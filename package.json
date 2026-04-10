@@ -1,0 +1,16 @@
+{
+  "name": "prompt-viewer",
+  "version": "1.0.0",
+  "description": "Post-send prompt viewer for Lumiverse",
+  "type": "module",
+  "scripts": {
+    "build": "bun run build:backend && bun run build:frontend",
+    "build:backend": "bun build src/backend.ts --outdir dist --target bun --format esm --sourcemap=external",
+    "build:frontend": "bun build src/frontend.ts --outdir dist --target browser --format esm --sourcemap=external",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "lumiverse-spindle-types": "latest"
+  }
+}
