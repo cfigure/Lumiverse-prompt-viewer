@@ -66,6 +66,10 @@ Enable the extension and grant all five permissions when prompted.
 9. **Copy** exports the prompt in the current view mode.
 10. **Clear** removes all captured prompts for the current chat (with confirmation).
 
+## Storage
+
+Prompt history is held **in memory only** and is not persisted to disk. All captured prompts are cleared when Lumiverse is restarted or the extension is toggled off. This is by design — prompt data can be large and storing it permanently would consume significant disk space.
+
 ## Project Structure
 
 ```
