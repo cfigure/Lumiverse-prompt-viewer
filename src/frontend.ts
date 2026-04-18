@@ -1,9 +1,6 @@
 // =============================================================================
 // prompt-viewer — Frontend
 // =============================================================================
-// Exports setup(ctx) per Spindle's frontend contract.
-// Registers a drawer tab that displays captured prompt snapshots.
-// =============================================================================
 
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
 import { PANEL_CSS } from './components/styles'
@@ -23,10 +20,22 @@ interface PromptSnapshot {
   messageId?: string
   messageNumber?: number
   isDryRun?: boolean
-  provider?: string
   model?: string
-  connectionName?: string
 }
+
+interface Settings {
+  defaultViewMode: 'formatted' | 'raw' | 'rendered'
+  showDryRunsByDefault: boolean
+  maxHistoryPerChat: number
+}
+
+const DEFAULT_SETTINGS: Settings = {
+  defaultViewMode: 'formatted',
+  showDryRunsByDefault: false,
+  maxHistoryPerChat: 50,
+}
+
+const GATED_PERMISSIONS = ['interceptor', 'generation', 'chat_mutation', 'chats']
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,7 +61,6 @@ function genTypeLabel(gt: string): string {
 }
 
 function copyToClipboard(text: string): void {
-  // Try the modern API first, fall back to textarea method
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(text).catch(() => fallbackCopy(text))
   } else {
@@ -71,7 +79,6 @@ function fallbackCopy(text: string): void {
   try {
     document.execCommand('copy')
   } catch {
-    // Last resort — open in a new window so user can copy manually
     const w = window.open('', '_blank')
     if (w) {
       w.document.write(`<pre>${text.replace(/</g, '&lt;')}</pre>`)
@@ -82,36 +89,168 @@ function fallbackCopy(text: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Setup — called by Spindle with the frontend context
+// Settings UI
+// ---------------------------------------------------------------------------
+function createSettingsUI(
+  currentSettings: Settings,
+  onSave: (s: Settings) => void,
+): { root: HTMLElement; update: (s: Settings) => void } {
+  const root = document.createElement('div')
+  root.className = 'pv-settings'
+
+  const title = document.createElement('div')
+  title.className = 'pv-settings-title'
+  title.textContent = 'Prompt Viewer'
+  root.appendChild(title)
+
+  const card = document.createElement('div')
+  card.className = 'pv-settings-card'
+
+  function addRow(label: string, input: HTMLElement): void {
+    const row = document.createElement('div')
+    row.className = 'pv-settings-row'
+    const lbl = document.createElement('label')
+    lbl.className = 'pv-settings-label'
+    lbl.textContent = label
+    row.append(lbl, input)
+    card.appendChild(row)
+  }
+
+  // Default view mode
+  const viewSelect = document.createElement('select')
+  viewSelect.className = 'pv-settings-input'
+  for (const mode of ['formatted', 'raw', 'rendered'] as const) {
+    const opt = document.createElement('option')
+    opt.value = mode
+    opt.textContent = mode.charAt(0).toUpperCase() + mode.slice(1)
+    if (mode === currentSettings.defaultViewMode) opt.selected = true
+    viewSelect.appendChild(opt)
+  }
+  addRow('Default view mode', viewSelect)
+
+  // Show dry runs
+  const dryCheck = document.createElement('input')
+  dryCheck.type = 'checkbox'
+  dryCheck.checked = currentSettings.showDryRunsByDefault
+  addRow('Show dry runs by default', dryCheck)
+
+  // Max history
+  const maxInput = document.createElement('input')
+  maxInput.className = 'pv-settings-input'
+  maxInput.type = 'number'
+  maxInput.min = '5'
+  maxInput.max = '500'
+  maxInput.value = String(currentSettings.maxHistoryPerChat)
+  addRow('Max prompts per chat', maxInput)
+
+  // Warning about max history
+  const note = document.createElement('div')
+  note.className = 'pv-settings-note'
+  note.textContent = 'Higher values use more memory. Prompt data is not persisted — history clears on restart. Values above 100 may cause performance issues with large prompts.'
+  card.appendChild(note)
+
+  // Save
+  const saveBtn = document.createElement('button')
+  saveBtn.className = 'pv-settings-save'
+  saveBtn.textContent = 'Save Settings'
+  saveBtn.addEventListener('click', () => {
+    onSave({
+      defaultViewMode: viewSelect.value as Settings['defaultViewMode'],
+      showDryRunsByDefault: dryCheck.checked,
+      maxHistoryPerChat: Math.min(500, Math.max(5, parseInt(maxInput.value) || 50)),
+    })
+    saveBtn.textContent = '✓ Saved'
+    setTimeout(() => { saveBtn.textContent = 'Save Settings' }, 1500)
+  })
+  card.appendChild(saveBtn)
+
+  root.appendChild(card)
+
+  function update(s: Settings): void {
+    viewSelect.value = s.defaultViewMode
+    dryCheck.checked = s.showDryRunsByDefault
+    maxInput.value = String(s.maxHistoryPerChat)
+  }
+
+  return { root, update }
+}
+
+// ---------------------------------------------------------------------------
+// Setup
 // ---------------------------------------------------------------------------
 export function setup(ctx: SpindleFrontendContext) {
-  // ---- Inject styles ----
+  const cleanups: (() => void)[] = []
+
   const removeStyle = ctx.dom.addStyle(PANEL_CSS)
+  cleanups.push(removeStyle)
 
   // ---- State ----
   let history: PromptSnapshot[] = []
-  let currentSnapshot: PromptSnapshot | null = null
-  let viewMode: 'formatted' | 'raw' | 'rendered' = 'formatted'
   let currentChatId: string | null = null
-  let showDryRuns = false
+  let settings: Settings = { ...DEFAULT_SETTINGS }
+  let viewMode: 'formatted' | 'raw' | 'rendered' = settings.defaultViewMode
+  let showDryRuns = settings.showDryRunsByDefault
 
-  // ---- Register drawer tab ----
+  // ---- Permission request on startup ----
+  ctx.permissions.getGranted().then((granted: string[]) => {
+    const missing = GATED_PERMISSIONS.filter((p) => !granted.includes(p))
+    if (missing.length === 0) return
+    ctx.ui.showConfirm({
+      title: 'Permissions Required',
+      message: `Prompt Viewer needs the following permissions to function: ${missing.join(', ')}.`,
+      variant: 'info',
+      confirmLabel: 'Grant Permissions',
+      cancelLabel: 'Not Now',
+    }).then(({ confirmed }) => {
+      if (confirmed) ctx.permissions.request(missing)
+    })
+  })
+
+  // React to permission changes in real-time
+  const unsubPermission = ctx.events.on('SPINDLE_PERMISSION_CHANGED', (payload: any) => {
+    if (payload.extensionId !== ctx.manifest.identifier) return
+    if (payload.granted) {
+      // Permission was just granted — refresh data
+      ctx.sendToBackend({ type: 'get_history' })
+    }
+  })
+  cleanups.push(unsubPermission)
+
+  // ---- Settings mount ----
+  const settingsMount = ctx.ui.mount('settings_extensions')
+  const settingsUI = createSettingsUI(settings, (newSettings) => {
+    settings = newSettings
+    viewMode = settings.defaultViewMode
+    showDryRuns = settings.showDryRunsByDefault
+    updateButtonStates()
+    ctx.sendToBackend({ type: 'save_settings', settings })
+  })
+  settingsMount.appendChild(settingsUI.root)
+
+  ctx.sendToBackend({ type: 'get_settings' })
+
+  // ---- Drawer tab ----
   const tab = ctx.ui.registerDrawerTab({
     id: 'prompt-viewer',
     title: 'Prompt Viewer',
+    shortName: 'Prompts',
+    description: 'Inspect the assembled prompt sent to the LLM',
+    keywords: ['prompt', 'inspector', 'debug', 'interceptor', 'raw'],
+    headerTitle: 'Prompt Viewer',
     iconSvg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" width="20" height="20">
       <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v1H3V4zm0 3h14v9a1 1 0 01-1 1H4a1 1 0 01-1-1V7zm3 2v1h8V9H6zm0 3v1h5v-1H6z"/>
     </svg>`,
   })
+  cleanups.push(() => tab.destroy())
 
-  const root = tab.root
-
-  // Auto-refresh when the tab is opened
   const unsubActivate = tab.onActivate(() => {
     ctx.sendToBackend({ type: 'get_history' })
   })
+  cleanups.push(unsubActivate)
 
-  // ---- Build toolbar ----
+  const root = tab.root
+
+  // ---- Toolbar ----
   const toolbar = document.createElement('div')
   toolbar.className = 'pv-toolbar'
 
@@ -136,77 +275,64 @@ export function setup(ctx: SpindleFrontendContext) {
   const dryRunBtn = document.createElement('button')
   dryRunBtn.textContent = '⚡ Dry Runs'
 
+  const settingsBtn = document.createElement('button')
+  settingsBtn.textContent = '⚙'
+  settingsBtn.title = 'Settings'
+
   const spacer = document.createElement('span')
   spacer.className = 'pv-spacer'
 
   const status = document.createElement('span')
   status.className = 'pv-status'
 
-  toolbar.append(select, refreshBtn, copyBtn, clearBtn, rawBtn, renderedBtn, dryRunBtn, spacer, status)
+  toolbar.append(select, refreshBtn, copyBtn, clearBtn, rawBtn, renderedBtn, dryRunBtn, settingsBtn, spacer, status)
 
-  // ---- Message display area ----
   const messagesEl = document.createElement('div')
   messagesEl.className = 'pv-messages'
 
   root.append(toolbar, messagesEl)
 
   // ---- Rendering ----
+  let currentSnapshot: PromptSnapshot | null = null
+
   function renderFormatted(snap: PromptSnapshot): void {
-    // Context metadata block
     const ctxBlock = document.createElement('div')
     ctxBlock.className = 'pv-context-block'
     const meta = snap.context as Record<string, unknown>
     const genType = genTypeLabel(String(meta.generationType ?? ''))
-    const worldInfoCount = Array.isArray(meta.activatedWorldInfo)
-      ? meta.activatedWorldInfo.length
-      : 0
+    const worldInfoCount = Array.isArray(meta.activatedWorldInfo) ? meta.activatedWorldInfo.length : 0
     ctxBlock.textContent = [
       `Generation: ${genType}`,
       `Chat: ${meta.chatId ?? '?'}`,
       `Connection: ${meta.connectionId ?? '?'}`,
       `Persona: ${meta.personaId ?? '?'}`,
       worldInfoCount > 0 ? `World Info entries: ${worldInfoCount}` : null,
-    ]
-      .filter(Boolean)
-      .join('\n')
+    ].filter(Boolean).join('\n')
     messagesEl.appendChild(ctxBlock)
 
-    // Messages
     snap.messages.forEach((msg, i) => {
       const wrapper = document.createElement('div')
       wrapper.className = `pv-message pv-role-${msg.role}`
-
-      // Header
       const header = document.createElement('div')
       header.className = 'pv-message-header'
-
       const label = document.createElement('span')
-      const roleText = msg.name ? `${msg.role} (${msg.name})` : msg.role
-      label.textContent = `#${i} — ${roleText}`
-
+      label.textContent = `#${i} — ${msg.name ? `${msg.role} (${msg.name})` : msg.role}`
       const badge = document.createElement('span')
       badge.className = 'pv-token-badge'
       badge.textContent = `~${Math.ceil((msg.content?.length ?? 0) / 4)} tok`
-
       const toggle = document.createElement('span')
       toggle.className = 'pv-toggle'
       toggle.textContent = '▼'
-
       header.append(label, badge, toggle)
-
-      // Body
       const body = document.createElement('div')
       body.className = 'pv-message-body'
       body.textContent = msg.content ?? ''
-
-      // Collapse toggle
       let collapsed = false
       header.addEventListener('click', () => {
         collapsed = !collapsed
         body.classList.toggle('pv-collapsed', collapsed)
         toggle.textContent = collapsed ? '▶' : '▼'
       })
-
       wrapper.append(header, body)
       messagesEl.appendChild(wrapper)
     })
@@ -215,15 +341,13 @@ export function setup(ctx: SpindleFrontendContext) {
   function renderRaw(snap: PromptSnapshot): void {
     const rawEl = document.createElement('div')
     rawEl.className = 'pv-raw'
-    // Show the messages array as clean JSON — this is what goes to the provider
     rawEl.textContent = JSON.stringify(snap.messages, null, 2)
     messagesEl.appendChild(rawEl)
   }
 
   function renderRendered(snap: PromptSnapshot): void {
-    // Concatenate all message content and render HTML tags visually
-    const container = document.createElement('div')
-    container.className = 'pv-rendered'
+    const rendered = document.createElement('div')
+    rendered.className = 'pv-rendered'
     snap.messages.forEach((msg) => {
       if (!msg.content) return
       const block = document.createElement('div')
@@ -233,14 +357,14 @@ export function setup(ctx: SpindleFrontendContext) {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/\n/g, '<br>')
-      container.appendChild(block)
+      rendered.appendChild(block)
     })
-    messagesEl.appendChild(container)
+    messagesEl.appendChild(rendered)
   }
 
   function renderSnapshot(snap: PromptSnapshot | null): void {
+    currentSnapshot = snap
     messagesEl.textContent = ''
-
     if (!snap) {
       const empty = document.createElement('div')
       empty.className = 'pv-empty'
@@ -249,21 +373,13 @@ export function setup(ctx: SpindleFrontendContext) {
       status.textContent = ''
       return
     }
+    if (viewMode === 'raw') renderRaw(snap)
+    else if (viewMode === 'rendered') renderRendered(snap)
+    else renderFormatted(snap)
 
-    if (viewMode === 'raw') {
-      renderRaw(snap)
-    } else if (viewMode === 'rendered') {
-      renderRendered(snap)
-    } else {
-      renderFormatted(snap)
-    }
-
-    // Status bar
     const dryLabel = snap.isDryRun ? '[DRY RUN] ' : ''
     const msgLabel = snap.messageNumber ? `Msg #${snap.messageNumber} · ` : ''
-    const apiLabel = snap.model
-      ? `${snap.provider ? snap.provider + ' / ' : ''}${snap.model} · `
-      : ''
+    const apiLabel = snap.model ? `${snap.model} · ` : ''
     status.textContent = `${dryLabel}${msgLabel}${apiLabel}${snap.messages.length} messages · ~${snap.estimatedTokens} tok · ${formatTime(snap.timestamp)}`
   }
 
@@ -294,15 +410,30 @@ export function setup(ctx: SpindleFrontendContext) {
     })
   }
 
+  function updateBadge(): void {
+    const filtered = getFilteredHistory()
+    tab.setBadge(filtered.length > 0 ? String(filtered.length) : '')
+  }
+
+  function updateButtonStates(): void {
+    rawBtn.classList.toggle('pv-active', viewMode === 'raw')
+    rawBtn.textContent = viewMode === 'raw' ? '{ } Raw ✓' : '{ } Raw'
+    renderedBtn.classList.toggle('pv-active', viewMode === 'rendered')
+    renderedBtn.textContent = viewMode === 'rendered' ? '◉ Rendered ✓' : '◉ Rendered'
+    dryRunBtn.classList.toggle('pv-active', showDryRuns)
+    dryRunBtn.textContent = showDryRuns ? '⚡ Dry Runs ✓' : '⚡ Dry Runs'
+  }
+
   // ---- Event handlers ----
   select.addEventListener('change', () => {
     const snap = history.find((s) => s.id === select.value) ?? null
-    currentSnapshot = snap
     renderSnapshot(snap)
   })
 
-  refreshBtn.addEventListener('click', () => {
-    ctx.sendToBackend({ type: 'get_history' })
+  refreshBtn.addEventListener('click', () => ctx.sendToBackend({ type: 'get_history' }))
+
+  settingsBtn.addEventListener('click', () => {
+    ctx.events.emit('open-settings', { view: 'extensions' })
   })
 
   copyBtn.addEventListener('click', () => {
@@ -311,16 +442,10 @@ export function setup(ctx: SpindleFrontendContext) {
     if (viewMode === 'raw') {
       text = JSON.stringify(currentSnapshot.messages, null, 2)
     } else if (viewMode === 'rendered') {
-      text = currentSnapshot.messages
-        .map((m) => m.content)
-        .filter(Boolean)
-        .join('\n\n')
+      text = currentSnapshot.messages.map((m) => m.content).filter(Boolean).join('\n\n')
     } else {
       text = currentSnapshot.messages
-        .map(
-          (m, i) =>
-            `--- [${i}] ${m.role}${m.name ? ` (${m.name})` : ''} ---\n${m.content}`
-        )
+        .map((m, i) => `--- [${i}] ${m.role}${m.name ? ` (${m.name})` : ''} ---\n${m.content}`)
         .join('\n\n')
     }
     copyToClipboard(text)
@@ -328,68 +453,57 @@ export function setup(ctx: SpindleFrontendContext) {
     setTimeout(() => { copyBtn.textContent = '⎘ Copy' }, 1500)
   })
 
-  clearBtn.addEventListener('click', () => {
-    if (!confirm('Clear all captured prompts for this chat? This cannot be undone.')) return
-    ctx.sendToBackend({ type: 'clear_history' })
+  clearBtn.addEventListener('click', async () => {
+    const { confirmed } = await ctx.ui.showConfirm({
+      title: 'Clear Prompt History',
+      message: 'Clear all captured prompts for this chat? This cannot be undone.',
+      variant: 'danger',
+      confirmLabel: 'Clear',
+    })
+    if (confirmed) ctx.sendToBackend({ type: 'clear_history' })
   })
 
   rawBtn.addEventListener('click', () => {
     viewMode = viewMode === 'raw' ? 'formatted' : 'raw'
-    rawBtn.classList.toggle('pv-active', viewMode === 'raw')
-    rawBtn.textContent = viewMode === 'raw' ? '{ } Raw ✓' : '{ } Raw'
-    renderedBtn.classList.remove('pv-active')
-    renderedBtn.textContent = '◉ Rendered'
+    updateButtonStates()
     renderSnapshot(currentSnapshot)
   })
 
   renderedBtn.addEventListener('click', () => {
     viewMode = viewMode === 'rendered' ? 'formatted' : 'rendered'
-    renderedBtn.classList.toggle('pv-active', viewMode === 'rendered')
-    renderedBtn.textContent = viewMode === 'rendered' ? '◉ Rendered ✓' : '◉ Rendered'
-    rawBtn.classList.remove('pv-active')
-    rawBtn.textContent = '{ } Raw'
+    updateButtonStates()
     renderSnapshot(currentSnapshot)
   })
 
   dryRunBtn.addEventListener('click', () => {
     showDryRuns = !showDryRuns
-    dryRunBtn.classList.toggle('pv-active', showDryRuns)
-    dryRunBtn.textContent = showDryRuns ? '⚡ Dry Runs ✓' : '⚡ Dry Runs'
+    updateButtonStates()
     populateSelect()
-    // If current snapshot is a dry-run and we just hid them, show the latest visible one
-    const filtered = getFilteredHistory()
     if (currentSnapshot?.isDryRun && !showDryRuns) {
+      const filtered = getFilteredHistory()
       currentSnapshot = filtered[0] ?? null
       if (currentSnapshot) select.value = currentSnapshot.id
       renderSnapshot(currentSnapshot)
     }
-    tab.setBadge(filtered.length > 0 ? String(filtered.length) : '')
+    updateBadge()
   })
 
-  // ---- Backend message listener ----
+  // ---- Backend messages ----
   const unsubBackend = ctx.onBackendMessage((payload: any) => {
     switch (payload.type) {
       case 'prompt_captured': {
-        // Only show prompts for the current chat
         const snapChatId = (payload.snapshot?.context as any)?.chatId
         if (snapChatId && currentChatId && snapChatId !== currentChatId) break
-
-        // Track current chat from first capture if not set yet
         if (!currentChatId && snapChatId) currentChatId = snapChatId
-
         history.unshift(payload.snapshot)
-        if (history.length > 50) history.pop()
+        if (history.length > settings.maxHistoryPerChat) history.pop()
         populateSelect()
-
-        const filtered = getFilteredHistory()
-        // Auto-display if it's visible (not a hidden dry-run)
         const isVisible = !payload.snapshot.isDryRun || showDryRuns
         if (isVisible) {
-          currentSnapshot = payload.snapshot
           select.value = payload.snapshot.id
           renderSnapshot(payload.snapshot)
         }
-        tab.setBadge(filtered.length > 0 ? String(filtered.length) : '')
+        updateBadge()
         break
       }
 
@@ -398,26 +512,22 @@ export function setup(ctx: SpindleFrontendContext) {
         populateSelect()
         const filtered = getFilteredHistory()
         if (filtered.length > 0) {
-          currentSnapshot = filtered[0]
           select.value = filtered[0].id
           renderSnapshot(filtered[0])
         } else {
-          currentSnapshot = null
           renderSnapshot(null)
         }
-        tab.setBadge(filtered.length > 0 ? String(filtered.length) : '')
+        updateBadge()
         break
       }
 
       case 'prompt_data': {
-        currentSnapshot = payload.snapshot ?? null
-        renderSnapshot(currentSnapshot)
+        renderSnapshot(payload.snapshot ?? null)
         break
       }
 
       case 'history_cleared': {
         history = []
-        currentSnapshot = null
         populateSelect()
         renderSnapshot(null)
         tab.setBadge('')
@@ -430,14 +540,12 @@ export function setup(ctx: SpindleFrontendContext) {
         populateSelect()
         const filtered = getFilteredHistory()
         if (filtered.length > 0) {
-          currentSnapshot = filtered[0]
           select.value = filtered[0].id
           renderSnapshot(filtered[0])
         } else {
-          currentSnapshot = null
           renderSnapshot(null)
         }
-        tab.setBadge(filtered.length > 0 ? String(filtered.length) : '')
+        updateBadge()
         break
       }
 
@@ -449,7 +557,6 @@ export function setup(ctx: SpindleFrontendContext) {
             history[idx] = updated
             populateSelect()
             if (currentSnapshot?.id === updated.id) {
-              currentSnapshot = updated
               select.value = updated.id
               renderSnapshot(updated)
             }
@@ -457,10 +564,22 @@ export function setup(ctx: SpindleFrontendContext) {
         }
         break
       }
+
+      case 'settings_loaded': {
+        if (payload.settings) {
+          settings = { ...DEFAULT_SETTINGS, ...payload.settings }
+          viewMode = settings.defaultViewMode
+          showDryRuns = settings.showDryRunsByDefault
+          updateButtonStates()
+          settingsUI.update(settings)
+        }
+        break
+      }
     }
   })
+  cleanups.push(unsubBackend)
 
-  // ---- Listen for chat switches on the frontend side ----
+  // ---- Chat switch ----
   const unsubChatChanged = ctx.events.on('CHAT_CHANGED', (payload: any) => {
     const chatId = payload.chatId ?? payload.chat?.id
     if (chatId) {
@@ -468,17 +587,16 @@ export function setup(ctx: SpindleFrontendContext) {
       ctx.sendToBackend({ type: 'set_active_chat', chatId })
     }
   })
+  cleanups.push(unsubChatChanged)
 
-  // ---- Initial data fetch ----
+  // ---- Initial fetch ----
   ctx.sendToBackend({ type: 'get_history' })
 
   // ---- Cleanup ----
   return () => {
-    unsubBackend()
-    unsubChatChanged()
-    unsubActivate()
-    removeStyle()
-    tab.destroy()
+    for (const fn of cleanups) {
+      try { fn() } catch {}
+    }
     ctx.dom.cleanup()
   }
 }
