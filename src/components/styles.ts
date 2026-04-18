@@ -26,6 +26,11 @@ export const PANEL_CSS = /* css */ `
   .pv-toolbar button:hover {
     border-color: var(--lumiverse-border-hover);
   }
+  .pv-toolbar button.pv-active {
+    background: var(--lumiverse-accent);
+    color: var(--lumiverse-accent-fg);
+    border-color: var(--lumiverse-accent);
+  }
   .pv-toolbar .pv-spacer { flex: 1; }
   .pv-toolbar .pv-status {
     font-size: 11px;
@@ -95,7 +100,7 @@ export const PANEL_CSS = /* css */ `
   .pv-role-assistant .pv-message-header { background: #251725; color: #bf6fbf; }
   .pv-role-assistant .pv-message-body   { background: #1a0f1a; color: #d0b0d0; }
 
-  /* ---- Context / params block ---- */
+  /* ---- Context block ---- */
   .pv-context-block {
     margin-bottom: 10px;
     padding: 8px 10px;
@@ -119,13 +124,6 @@ export const PANEL_CSS = /* css */ `
     padding: 1px 5px;
     border-radius: 3px;
     margin-left: 6px;
-  }
-
-  /* ---- Active toggle button ---- */
-  .pv-toolbar button.pv-active {
-    background: var(--lumiverse-accent);
-    color: var(--lumiverse-accent-fg);
-    border-color: var(--lumiverse-accent);
   }
 
   /* ---- Raw view ---- */
@@ -169,5 +167,64 @@ export const PANEL_CSS = /* css */ `
     font-size: 13px;
     text-align: center;
     padding: 20px;
+  }
+
+  /* ---- Settings (settings_extensions mount) ---- */
+  .pv-settings {
+    padding: 0;
+  }
+  .pv-settings-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--lumiverse-text);
+    padding: 12px 16px 8px;
+  }
+  .pv-settings-card {
+    padding: 8px 16px 16px;
+  }
+  .pv-settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--lumiverse-border);
+  }
+  .pv-settings-row:last-of-type {
+    border-bottom: none;
+  }
+  .pv-settings-label {
+    font-size: 13px;
+    color: var(--lumiverse-text);
+  }
+  .pv-settings-input {
+    background: var(--lumiverse-fill);
+    color: var(--lumiverse-text);
+    border: 1px solid var(--lumiverse-border);
+    border-radius: var(--lumiverse-radius);
+    padding: 4px 8px;
+    font-size: 12px;
+    min-width: 100px;
+  }
+  .pv-settings-note {
+    font-size: 11px;
+    color: var(--lumiverse-text-dim);
+    padding: 10px 0 6px;
+    font-style: italic;
+  }
+  .pv-settings-save {
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px;
+    background: var(--lumiverse-accent);
+    color: var(--lumiverse-accent-fg);
+    border: none;
+    border-radius: var(--lumiverse-radius);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .pv-settings-save:hover {
+    opacity: 0.9;
   }
 `
