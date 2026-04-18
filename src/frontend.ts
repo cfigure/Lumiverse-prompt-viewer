@@ -51,6 +51,36 @@ function genTypeLabel(gt: string): string {
   return labels[gt] ?? gt
 }
 
+function copyToClipboard(text: string): void {
+  // Try the modern API first, fall back to textarea method
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text))
+  } else {
+    fallbackCopy(text)
+  }
+}
+
+function fallbackCopy(text: string): void {
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    document.execCommand('copy')
+  } catch {
+    // Last resort — open in a new window so user can copy manually
+    const w = window.open('', '_blank')
+    if (w) {
+      w.document.write(`<pre>${text.replace(/</g, '&lt;')}</pre>`)
+      w.document.close()
+    }
+  }
+  document.body.removeChild(textarea)
+}
+
 // ---------------------------------------------------------------------------
 // Setup — called by Spindle with the frontend context
 // ---------------------------------------------------------------------------
@@ -280,6 +310,11 @@ export function setup(ctx: SpindleFrontendContext) {
     let text: string
     if (viewMode === 'raw') {
       text = JSON.stringify(currentSnapshot.messages, null, 2)
+    } else if (viewMode === 'rendered') {
+      text = currentSnapshot.messages
+        .map((m) => m.content)
+        .filter(Boolean)
+        .join('\n\n')
     } else {
       text = currentSnapshot.messages
         .map(
@@ -288,7 +323,9 @@ export function setup(ctx: SpindleFrontendContext) {
         )
         .join('\n\n')
     }
-    navigator.clipboard.writeText(text)
+    copyToClipboard(text)
+    copyBtn.textContent = '✓ Copied'
+    setTimeout(() => { copyBtn.textContent = '⎘ Copy' }, 1500)
   })
 
   clearBtn.addEventListener('click', () => {
