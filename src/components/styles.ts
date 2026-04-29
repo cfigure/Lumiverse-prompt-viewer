@@ -91,14 +91,16 @@ export const PANEL_CSS = /* css */ `
   .pv-message-body.pv-collapsed { display: none; }
 
   /* ---- Role colors ---- */
-  .pv-role-system .pv-message-header  { background: #172317; color: #6fbf6f; }
-  .pv-role-system .pv-message-body    { background: #0f170f; color: #b0d0b0; }
+  /* Use Lumiverse theme variables as base, with semi-transparent hue tints */
+  .pv-role-system .pv-message-header  { background: color-mix(in srgb, var(--lumiverse-fill) 70%, hsl(120, 40%, 40%)); color: hsl(120, 45%, 65%); }
+  .pv-role-system .pv-message-body    { background: color-mix(in srgb, var(--lumiverse-fill-subtle) 85%, hsl(120, 30%, 35%)); color: var(--lumiverse-text-muted); }
 
-  .pv-role-user .pv-message-header    { background: #171b2a; color: #6f8fbf; }
-  .pv-role-user .pv-message-body      { background: #0f1120; color: #b0c0d8; }
+  .pv-role-user .pv-message-header    { background: color-mix(in srgb, var(--lumiverse-fill) 70%, hsl(220, 45%, 45%)); color: hsl(220, 50%, 70%); }
+  .pv-role-user .pv-message-body      { background: color-mix(in srgb, var(--lumiverse-fill-subtle) 85%, hsl(220, 35%, 40%)); color: var(--lumiverse-text-muted); }
 
-  .pv-role-assistant .pv-message-header { background: #251725; color: #bf6fbf; }
-  .pv-role-assistant .pv-message-body   { background: #1a0f1a; color: #d0b0d0; }
+  .pv-role-assistant .pv-message-header { background: color-mix(in srgb, var(--lumiverse-fill) 70%, hsl(300, 35%, 40%)); color: hsl(300, 40%, 70%); }
+  .pv-role-assistant .pv-message-body   { background: color-mix(in srgb, var(--lumiverse-fill-subtle) 85%, hsl(300, 25%, 35%)); color: var(--lumiverse-text-muted); }
+
 
   /* ---- Context block ---- */
   .pv-context-block {
