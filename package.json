@@ -1,6 +1,6 @@
 {
   "name": "prompt-viewer",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Post-send prompt viewer for Lumiverse",
   "type": "module",
   "scripts": {
