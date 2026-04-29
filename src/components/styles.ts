@@ -117,6 +117,20 @@ export const PANEL_CSS = /* css */ `
     overflow-y: auto;
   }
 
+  /* ---- OOC / Regen feedback block ---- */
+  .pv-ooc-block {
+    border-color: color-mix(in srgb, var(--lumiverse-border) 50%, hsl(35, 80%, 55%));
+    background: color-mix(in srgb, var(--lumiverse-fill-subtle) 85%, hsl(35, 60%, 40%));
+    color: hsl(35, 55%, 70%);
+  }
+
+  /* ---- Aborted generation indicator ---- */
+  .pv-role-system .pv-message-header.pv-aborted,
+  .pv-role-user .pv-message-header.pv-aborted,
+  .pv-role-assistant .pv-message-header.pv-aborted {
+    background: color-mix(in srgb, var(--lumiverse-fill) 70%, hsl(0, 50%, 40%));
+  }
+
   /* ---- Token badge ---- */
   .pv-token-badge {
     display: inline-block;
