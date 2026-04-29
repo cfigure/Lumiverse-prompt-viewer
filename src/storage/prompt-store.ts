@@ -22,6 +22,7 @@ export interface PromptSnapshot {
   messages: LlmMessage[]
   context: InterceptorMeta
   estimatedTokens: number
+  generationId?: string
   messageId?: string
   messageNumber?: number
   isDryRun?: boolean
@@ -77,8 +78,19 @@ export class PromptStore {
     return null
   }
 
-  linkMessage(chatId: string, messageId: string, messageNumber?: number): void {
+  linkMessage(chatId: string, messageId: string, messageNumber?: number, generationId?: string): void {
     const arr = this.getChat(chatId)
+    // Prefer linking by generationId for reliability
+    if (generationId) {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (arr[i].generationId === generationId) {
+          arr[i].messageId = messageId
+          if (messageNumber !== undefined) arr[i].messageNumber = messageNumber
+          return
+        }
+      }
+    }
+    // Fallback: find the most recent unlinked snapshot
     for (let i = arr.length - 1; i >= 0; i--) {
       if (!arr[i].messageId) {
         arr[i].messageId = messageId
@@ -99,6 +111,18 @@ export class PromptStore {
       }
     }
     return removed
+  }
+
+  /** Delete snapshots whose linked messageNumber matches, for any chat */
+  deleteByMessageNumber(chatId: string, messageNumber: number): number {
+    const arr = this.chats.get(chatId)
+    if (!arr) return 0
+    const before = arr.length
+    const filtered = arr.filter((s) => s.messageNumber !== messageNumber)
+    if (filtered.length < before) {
+      this.chats.set(chatId, filtered)
+    }
+    return before - filtered.length
   }
 
   clearChat(chatId: string): void {
