@@ -17,6 +17,7 @@ interface PromptSnapshot {
   messages: LlmMessage[]
   context: Record<string, unknown>
   estimatedTokens: number
+  generationId?: string
   messageId?: string
   messageNumber?: number
   isDryRun?: boolean
@@ -26,12 +27,14 @@ interface PromptSnapshot {
 interface Settings {
   defaultViewMode: 'formatted' | 'raw' | 'rendered'
   showDryRunsByDefault: boolean
+  dryRunMode: 'only' | 'alongside'
   maxHistoryPerChat: number
 }
 
 const DEFAULT_SETTINGS: Settings = {
   defaultViewMode: 'formatted',
   showDryRunsByDefault: false,
+  dryRunMode: 'only',
   maxHistoryPerChat: 50,
 }
 
@@ -134,6 +137,18 @@ function createSettingsUI(
   dryCheck.checked = currentSettings.showDryRunsByDefault
   addRow('Show dry runs by default', dryCheck)
 
+  // Dry run display mode
+  const dryModeSelect = document.createElement('select')
+  dryModeSelect.className = 'pv-settings-input'
+  for (const [value, label] of [['only', 'Dry runs only'], ['alongside', 'Alongside normal']] as const) {
+    const opt = document.createElement('option')
+    opt.value = value
+    opt.textContent = label
+    if (value === currentSettings.dryRunMode) opt.selected = true
+    dryModeSelect.appendChild(opt)
+  }
+  addRow('Dry run display', dryModeSelect)
+
   // Max history
   const maxInput = document.createElement('input')
   maxInput.className = 'pv-settings-input'
@@ -157,6 +172,7 @@ function createSettingsUI(
     onSave({
       defaultViewMode: viewSelect.value as Settings['defaultViewMode'],
       showDryRunsByDefault: dryCheck.checked,
+      dryRunMode: dryModeSelect.value as Settings['dryRunMode'],
       maxHistoryPerChat: Math.min(500, Math.max(5, parseInt(maxInput.value) || 50)),
     })
     saveBtn.textContent = '✓ Saved'
@@ -169,6 +185,7 @@ function createSettingsUI(
   function update(s: Settings): void {
     viewSelect.value = s.defaultViewMode
     dryCheck.checked = s.showDryRunsByDefault
+    dryModeSelect.value = s.dryRunMode
     maxInput.value = String(s.maxHistoryPerChat)
   }
 
@@ -207,14 +224,20 @@ export function setup(ctx: SpindleFrontendContext) {
   })
 
   // React to permission changes in real-time
-  const unsubPermission = ctx.events.on('SPINDLE_PERMISSION_CHANGED', (payload: any) => {
-    if (payload.extensionId !== ctx.manifest.identifier) return
+  // Listen to both event names for compatibility across Lumiverse versions
+  function handlePermissionChanged(payload: any): void {
+    // Current API shape: { permission, granted, allGranted }
+    // Legacy shape: { extensionId, permission, granted }
+    // If extensionId is present and doesn't match us, ignore
+    if (payload.extensionId && payload.extensionId !== ctx.manifest.identifier) return
     if (payload.granted) {
       // Permission was just granted — refresh data
       ctx.sendToBackend({ type: 'get_history' })
     }
-  })
-  cleanups.push(unsubPermission)
+  }
+  const unsubPermissionNew = ctx.events.on('PERMISSION_CHANGED', handlePermissionChanged)
+  const unsubPermissionLegacy = ctx.events.on('SPINDLE_PERMISSION_CHANGED', handlePermissionChanged)
+  cleanups.push(unsubPermissionNew, unsubPermissionLegacy)
 
   // ---- Settings mount ----
   const settingsMount = ctx.ui.mount('settings_extensions')
@@ -384,8 +407,9 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function getFilteredHistory(): PromptSnapshot[] {
-    if (showDryRuns) return history
-    return history.filter((s) => !s.isDryRun)
+    if (!showDryRuns) return history.filter((s) => !s.isDryRun)
+    if (settings.dryRunMode === 'alongside') return history
+    return history.filter((s) => s.isDryRun)
   }
 
   function populateSelect(): void {
@@ -479,8 +503,9 @@ export function setup(ctx: SpindleFrontendContext) {
     showDryRuns = !showDryRuns
     updateButtonStates()
     populateSelect()
-    if (currentSnapshot?.isDryRun && !showDryRuns) {
-      const filtered = getFilteredHistory()
+    const filtered = getFilteredHistory()
+    // If current snapshot isn't in the filtered set, switch to the first one
+    if (currentSnapshot && !filtered.some((s) => s.id === currentSnapshot!.id)) {
       currentSnapshot = filtered[0] ?? null
       if (currentSnapshot) select.value = currentSnapshot.id
       renderSnapshot(currentSnapshot)
@@ -498,7 +523,10 @@ export function setup(ctx: SpindleFrontendContext) {
         history.unshift(payload.snapshot)
         if (history.length > settings.maxHistoryPerChat) history.pop()
         populateSelect()
-        const isVisible = !payload.snapshot.isDryRun || showDryRuns
+        const isDry = payload.snapshot.isDryRun
+        const isVisible = !showDryRuns
+          ? !isDry
+          : settings.dryRunMode === 'alongside' || isDry
         if (isVisible) {
           select.value = payload.snapshot.id
           renderSnapshot(payload.snapshot)
