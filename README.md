@@ -12,18 +12,19 @@ A Spindle extension for [Lumiverse](https://github.com/prolix-oc/Lumiverse) that
 - **Message linking** — Each captured prompt shows the chat message number it produced (e.g. #4)
 - **Generation metadata** — Shows generation type, chat ID, connection, persona, and activated world info
 - **Auto-updates** — New captures appear in real time, auto-refresh on tab activation and chat switching
-- **Message deletion sync** — Deleting a message removes its associated prompt
+- **Message deletion sync** — Deleting a message removes its associated prompt; also cleans up orphaned snapshots whose linked messages no longer exist
 - **Chat deletion cleanup** — Deleting a chat clears all its captured prompts
 - **Copy to clipboard** — Export in the active view mode with "✓ Copied" feedback
 - **Token estimates** — Rough per-message and total token counts
 - **Configurable history** — Adjust max prompts per chat (default 50, up to 500)
 - **Persistent settings** — Preferences persist across extension restarts via userStorage
+- **Theme-aware styling** — Role colors adapt to light and dark Lumiverse themes
 
 ## How It Works
 
-**Backend** — Registers a passive interceptor via `spindle.registerInterceptor()` with priority 999 (runs last) so it captures the final prompt after all other interceptors have modified it. Returns the messages array unchanged. Tracks active generation IDs via `GENERATION_STARTED` to distinguish real generations from dry-runs and to capture model info. On `GENERATION_ENDED`, it looks up the real message index via `spindle.chat.getMessages()` and links it to the snapshot. On `CHAT_CHANGED`, it checks if the previous chat was deleted and cleans up its prompts. Settings are stored via `spindle.userStorage` for operator-scoped compatibility.
+**Backend** — Registers a passive interceptor via `spindle.registerInterceptor()` with priority 999 (runs last) so it captures the final prompt after all other interceptors have modified it. Returns the messages array unchanged. Tracks active generation IDs via `GENERATION_STARTED` to distinguish real generations from dry-runs, capture model info, and tag each snapshot with its `generationId` for reliable message linking. On `GENERATION_ENDED`, it links the snapshot to the resulting message by matching `generationId` first, then falls back to the most recent unlinked snapshot. On `MESSAGE_DELETED`, it removes the associated prompt snapshot and also checks for orphaned snapshots whose linked messages no longer exist. On `CHAT_CHANGED`, it checks if the previous chat was deleted (via `spindle.chats.get()` returning `null`) and cleans up its prompts. Settings are stored via `spindle.userStorage` for operator-scoped compatibility.
 
-**Frontend** — Registers a drawer tab in the ViewportDrawer sidebar. Settings are rendered in the native Lumiverse Settings → Extensions panel via `ctx.ui.mount('settings_extensions')`. On first install, prompts the user to grant all required permissions via `ctx.permissions.request()`. Listens for `SPINDLE_PERMISSION_CHANGED` events to react when permissions are granted after the fact.
+**Frontend** — Registers a drawer tab in the ViewportDrawer sidebar with command palette integration (searchable as "Prompts", "inspector", "debug"). Settings are rendered in the native Lumiverse Settings → Extensions panel via `ctx.ui.mount('settings_extensions')`. On first install, prompts the user to grant all required permissions via `ctx.permissions.request()`. Listens for both `PERMISSION_CHANGED` and `SPINDLE_PERMISSION_CHANGED` events for compatibility across Lumiverse versions.
 
 ## Permissions
 
@@ -105,11 +106,20 @@ spindle.json              Extension manifest
 The interceptor receives `(messages, context)` where:
 
 - `messages` — `LlmMessageDTO[]` — `{ role, content, name? }`
-- `context` — `{ chatId, connectionId, personaId, generationType }`
+- `context` — `{ chatId, connectionId, personaId, generationType, activatedWorldInfo }`
 
 `generationType` is one of: `normal`, `continue`, `regenerate`, `swipe`, `impersonate`, `quiet`.
 
+**Note:** As of Lumiverse's current version, `generationType` may not always distinguish between all types — for example, swipes may arrive as `"regenerate"` and continues as `"normal"`. The extension displays whatever value the interceptor context provides.
+
 ## Changelog
+
+### 1.0.3
+- **Fixed message deletion sync** — Deleting a message now reliably removes its associated prompt snapshot. Also detects and cleans up orphaned snapshots whose linked messages no longer exist (e.g. when Lumiverse cascades a deletion)
+- **Fixed chat deletion detection** — `spindle.chats.get()` returns `null` for deleted chats; the previous code expected an exception and never cleaned up
+- **Improved snapshot linking** — Snapshots are now tagged with `generationId` during capture, so `GENERATION_ENDED` can link by ID instead of relying on a fragile "most recent unlinked" heuristic. Fixes mislinked prompts during rapid swipes or back-to-back generations
+- **Fixed permission change detection** — Listens for both `PERMISSION_CHANGED` (current API) and `SPINDLE_PERMISSION_CHANGED` (legacy) with a payload-shape-agnostic handler
+- **Theme-aware role colors** — Role color blocks now use Lumiverse CSS variables (`--lumiverse-fill`, `--lumiverse-fill-subtle`, `--lumiverse-text-muted`) with `color-mix()` tints, so they adapt to both light and dark themes instead of being hardcoded for dark mode only
 
 ### 1.0.2
 - Added settings panel (view mode, dry runs, max history)
