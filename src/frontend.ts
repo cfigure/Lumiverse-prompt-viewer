@@ -7,7 +7,7 @@ import { PANEL_CSS } from './components/styles'
 
 interface LlmMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string | Array<{ type: string; text?: string; [key: string]: unknown }>
   name?: string
 }
 
@@ -22,6 +22,11 @@ interface PromptSnapshot {
   messageNumber?: number
   isDryRun?: boolean
   model?: string
+  regenFeedback?: string
+  regenFeedbackPosition?: 'system' | 'user'
+  isSwipe?: boolean
+  swipeIndex?: number
+  wasAborted?: boolean
 }
 
 interface Settings {
@@ -43,6 +48,14 @@ const GATED_PERMISSIONS = ['interceptor', 'generation', 'chat_mutation', 'chats'
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+function msgText(content: LlmMessage['content']): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content.filter((p) => p.type === 'text' && typeof p.text === 'string').map((p) => p.text!).join('')
+  }
+  return ''
+}
+
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
     hour: '2-digit',
@@ -322,16 +335,27 @@ export function setup(ctx: SpindleFrontendContext) {
     const ctxBlock = document.createElement('div')
     ctxBlock.className = 'pv-context-block'
     const meta = snap.context as Record<string, unknown>
-    const genType = genTypeLabel(String(meta.generationType ?? ''))
+    // Use isSwipe flag to override the label when we know it's a swipe
+    const rawGenType = String(meta.generationType ?? '')
+    const genType = snap.isSwipe ? 'Swipe' : genTypeLabel(rawGenType)
     const worldInfoCount = Array.isArray(meta.activatedWorldInfo) ? meta.activatedWorldInfo.length : 0
     ctxBlock.textContent = [
-      `Generation: ${genType}`,
+      `Generation: ${genType}${snap.swipeIndex != null ? ` #${snap.swipeIndex}` : ''}${snap.wasAborted ? ' (aborted)' : ''}`,
       `Chat: ${meta.chatId ?? '?'}`,
       `Connection: ${meta.connectionId ?? '?'}`,
       `Persona: ${meta.personaId ?? '?'}`,
+      snap.model ? `Model: ${snap.model}` : null,
       worldInfoCount > 0 ? `World Info entries: ${worldInfoCount}` : null,
     ].filter(Boolean).join('\n')
     messagesEl.appendChild(ctxBlock)
+
+    // Show regen feedback if present
+    if (snap.regenFeedback) {
+      const oocBlock = document.createElement('div')
+      oocBlock.className = 'pv-context-block pv-ooc-block'
+      oocBlock.textContent = `OOC Feedback (${snap.regenFeedbackPosition ?? 'user'}): ${snap.regenFeedback}`
+      messagesEl.appendChild(oocBlock)
+    }
 
     snap.messages.forEach((msg, i) => {
       const wrapper = document.createElement('div')
@@ -342,14 +366,14 @@ export function setup(ctx: SpindleFrontendContext) {
       label.textContent = `#${i} — ${msg.name ? `${msg.role} (${msg.name})` : msg.role}`
       const badge = document.createElement('span')
       badge.className = 'pv-token-badge'
-      badge.textContent = `~${Math.ceil((msg.content?.length ?? 0) / 4)} tok`
+      badge.textContent = `~${Math.ceil(msgText(msg.content).length / 4)} tok`
       const toggle = document.createElement('span')
       toggle.className = 'pv-toggle'
       toggle.textContent = '▼'
       header.append(label, badge, toggle)
       const body = document.createElement('div')
       body.className = 'pv-message-body'
-      body.textContent = msg.content ?? ''
+      body.textContent = msgText(msg.content)
       let collapsed = false
       header.addEventListener('click', () => {
         collapsed = !collapsed
@@ -401,9 +425,11 @@ export function setup(ctx: SpindleFrontendContext) {
     else renderFormatted(snap)
 
     const dryLabel = snap.isDryRun ? '[DRY RUN] ' : ''
+    const abortLabel = snap.wasAborted ? '[ABORTED] ' : ''
     const msgLabel = snap.messageNumber ? `Msg #${snap.messageNumber} · ` : ''
+    const swipeLabel = snap.swipeIndex != null ? `Swipe #${snap.swipeIndex} · ` : ''
     const apiLabel = snap.model ? `${snap.model} · ` : ''
-    status.textContent = `${dryLabel}${msgLabel}${apiLabel}${snap.messages.length} messages · ~${snap.estimatedTokens} tok · ${formatTime(snap.timestamp)}`
+    status.textContent = `${dryLabel}${abortLabel}${msgLabel}${swipeLabel}${apiLabel}${snap.messages.length} messages · ~${snap.estimatedTokens} tok · ${formatTime(snap.timestamp)}`
   }
 
   function getFilteredHistory(): PromptSnapshot[] {
@@ -427,9 +453,14 @@ export function setup(ctx: SpindleFrontendContext) {
       opt.value = snap.id
       const prefix = i === 0 ? '● ' : ''
       const dryTag = snap.isDryRun ? '[DRY] ' : ''
-      const gt = genTypeLabel(String((snap.context as any)?.generationType ?? ''))
+      const oocTag = snap.regenFeedback ? '[OOC] ' : ''
+      const abortTag = snap.wasAborted ? '[✗] ' : ''
+      const rawGt = String((snap.context as any)?.generationType ?? '')
+      const gt = snap.isSwipe ? 'Swipe' : genTypeLabel(rawGt)
+      const swipeLabel = snap.swipeIndex != null ? `sw${snap.swipeIndex}` : ''
       const msgLabel = snap.messageNumber ? `#${snap.messageNumber}` : ''
-      opt.textContent = `${prefix}${dryTag}${msgLabel ? msgLabel + ' · ' : ''}${formatTime(snap.timestamp)} · ${gt} · ${snap.messages.length} msgs`
+      const locator = [msgLabel, swipeLabel].filter(Boolean).join('/')
+      opt.textContent = `${prefix}${dryTag}${oocTag}${abortTag}${locator ? locator + ' · ' : ''}${formatTime(snap.timestamp)} · ${gt} · ${snap.messages.length} msgs`
       select.appendChild(opt)
     })
   }
@@ -608,9 +639,24 @@ export function setup(ctx: SpindleFrontendContext) {
   cleanups.push(unsubBackend)
 
   // ---- Chat switch ----
+  const unsubChatSwitched = ctx.events.on('CHAT_SWITCHED', (payload: any) => {
+    const chatId = payload.chatId ?? null
+    currentChatId = chatId
+    if (chatId) {
+      ctx.sendToBackend({ type: 'set_active_chat', chatId })
+    } else {
+      // User went to home screen
+      history = []
+      populateSelect()
+      renderSnapshot(null)
+      updateBadge()
+    }
+  })
+  cleanups.push(unsubChatSwitched)
+
   const unsubChatChanged = ctx.events.on('CHAT_CHANGED', (payload: any) => {
     const chatId = payload.chatId ?? payload.chat?.id
-    if (chatId) {
+    if (chatId && chatId !== currentChatId) {
       currentChatId = chatId
       ctx.sendToBackend({ type: 'set_active_chat', chatId })
     }
