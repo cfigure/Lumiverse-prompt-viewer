@@ -17,12 +17,14 @@ let currentUserId: string | undefined
 interface Settings {
   defaultViewMode: 'formatted' | 'raw' | 'rendered'
   showDryRunsByDefault: boolean
+  dryRunMode: 'only' | 'alongside'
   maxHistoryPerChat: number
 }
 
 const DEFAULT_SETTINGS: Settings = {
   defaultViewMode: 'formatted',
   showDryRunsByDefault: false,
+  dryRunMode: 'only',
   maxHistoryPerChat: 50,
 }
 
@@ -90,10 +92,11 @@ spindle.registerInterceptor(async (messages, context) => {
       isDryRun: activeGenerations.size === 0,
     }
 
-    // Pull model from GENERATION_STARTED
+    // Pull model and generationId from GENERATION_STARTED
     if (activeGenerations.size > 0) {
       const latestGenId = [...activeGenerations].at(-1)
       if (latestGenId) {
+        snapshot.generationId = latestGenId
         const meta = generationMeta.get(latestGenId)
         if (meta) snapshot.model = meta.model
       }
@@ -125,8 +128,10 @@ spindle.on('CHAT_CHANGED', async (payload: any) => {
     // Check if previous chat was deleted
     if (previousChatId && previousChatId !== chatId) {
       try {
-        await spindle.chats.get(previousChatId)
+        const prev = await spindle.chats.get(previousChatId)
+        if (!prev) store.clearChat(previousChatId)
       } catch {
+        // API error — assume deleted to be safe
         store.clearChat(previousChatId)
       }
     }
@@ -205,9 +210,10 @@ spindle.log.info('Prompt Viewer backend loaded — interceptor registered.')
 // Generation events
 // ---------------------------------------------------------------------------
 spindle.on('GENERATION_ENDED', async (payload: any) => {
-  if (payload.generationId) {
-    activeGenerations.delete(payload.generationId)
-    generationMeta.delete(payload.generationId)
+  const genId = payload.generationId
+  if (genId) {
+    activeGenerations.delete(genId)
+    generationMeta.delete(genId)
   }
   if (!payload.chatId || !payload.messageId) return
 
@@ -215,14 +221,14 @@ spindle.on('GENERATION_ENDED', async (payload: any) => {
     const messages = await spindle.chat.getMessages(payload.chatId)
     const index = messages.findIndex((m: any) => m.id === payload.messageId)
     const msgNum = index !== -1 ? index + 1 : undefined
-    store.linkMessage(payload.chatId, payload.messageId, msgNum)
+    store.linkMessage(payload.chatId, payload.messageId, msgNum, genId)
 
     const updated = store.getAll(payload.chatId).find((s) => s.messageId === payload.messageId)
     if (updated) {
       spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: updated })
     }
   } catch (err: any) {
-    store.linkMessage(payload.chatId, payload.messageId)
+    store.linkMessage(payload.chatId, payload.messageId, undefined, genId)
   }
 })
 
@@ -233,17 +239,41 @@ spindle.on('GENERATION_STOPPED', (payload: any) => {
   }
 })
 
-spindle.on('MESSAGE_DELETED', (payload: any) => {
+spindle.on('MESSAGE_DELETED', async (payload: any) => {
+  const chatId = payload.chatId || activeChatId
+  if (!chatId) return
+
+  let removed = 0
+
+  // Try direct match by messageId
   if (payload.messageId) {
-    const removed = store.deleteByMessageId(payload.messageId)
-    if (removed > 0) {
-      if (payload.chatId || activeChatId) {
-        const chatId = payload.chatId || activeChatId
-        spindle.sendToFrontend({
-          type: 'prompt_history',
-          snapshots: store.getAll(chatId),
-        })
+    removed += store.deleteByMessageId(payload.messageId)
+  }
+
+  // If direct match didn't find anything, the deleted message might be the
+  // user message that preceded an assistant response. Rebuild messageNumber
+  // links by re-reading the current message list so stale snapshots don't
+  // reference messages that no longer exist.
+  if (removed === 0 && payload.messageId) {
+    try {
+      const currentMessages = await spindle.chat.getMessages(chatId)
+      const currentIds = new Set(currentMessages.map((m: any) => m.id))
+      const snapshots = store.getAll(chatId)
+      for (const snap of snapshots) {
+        if (snap.messageId && !currentIds.has(snap.messageId)) {
+          // This snapshot's linked message no longer exists — remove it
+          store.deleteByMessageId(snap.messageId)
+          removed++
+        }
       }
+    } catch {
+      // Can't verify — skip
     }
   }
+
+  // Always notify frontend of current state after a deletion event
+  spindle.sendToFrontend({
+    type: 'prompt_history',
+    snapshots: store.getAll(chatId),
+  })
 })
