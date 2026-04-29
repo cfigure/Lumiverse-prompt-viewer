@@ -51,12 +51,26 @@ async function saveSettings(settings: Settings): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Content helper — messages can be a plain string or multipart array
+// ---------------------------------------------------------------------------
+function messageText(content: LlmMessage['content']): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((p) => p.type === 'text' && typeof p.text === 'string')
+      .map((p) => p.text!)
+      .join('')
+  }
+  return ''
+}
+
+// ---------------------------------------------------------------------------
 // Token estimator
 // ---------------------------------------------------------------------------
 function estimateTokens(messages: LlmMessage[]): number {
   let chars = 0
   for (const msg of messages) {
-    chars += (msg.role?.length ?? 0) + (msg.content?.length ?? 0)
+    chars += (msg.role?.length ?? 0) + messageText(msg.content).length
   }
   return Math.ceil(chars / 4)
 }
@@ -77,6 +91,31 @@ spindle.on('GENERATION_STARTED', (payload: any) => {
 })
 
 // ---------------------------------------------------------------------------
+// OOC / regen feedback extraction
+// ---------------------------------------------------------------------------
+const OOC_PATTERN = /\[OOC:\s*([\s\S]*?)\]\s*$/
+
+function extractRegenFeedback(
+  messages: LlmMessage[],
+): { feedback: string; position: 'system' | 'user' } | null {
+  // Scan backwards — check the last few messages for [OOC: ...] regardless
+  // of generation type, since it can appear on regen, swipe, or future types.
+  for (let i = messages.length - 1; i >= Math.max(0, messages.length - 4); i--) {
+    const msg = messages[i]
+    const text = messageText(msg.content)
+    const match = text.match(OOC_PATTERN)
+    if (match) {
+      return {
+        feedback: match[1].trim(),
+        position: msg.role === 'system' ? 'system' : 'user',
+      }
+    }
+  }
+
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // Interceptor — passive tap
 // ---------------------------------------------------------------------------
 spindle.registerInterceptor(async (messages, context) => {
@@ -90,6 +129,13 @@ spindle.registerInterceptor(async (messages, context) => {
       context: structuredClone(ctx),
       estimatedTokens: estimateTokens(messages as LlmMessage[]),
       isDryRun: activeGenerations.size === 0,
+    }
+
+    // Extract OOC regen feedback if present
+    const ooc = extractRegenFeedback(messages as LlmMessage[])
+    if (ooc) {
+      snapshot.regenFeedback = ooc.feedback
+      snapshot.regenFeedbackPosition = ooc.position
     }
 
     // Pull model and generationId from GENERATION_STARTED
@@ -119,22 +165,21 @@ spindle.registerInterceptor(async (messages, context) => {
 // ---------------------------------------------------------------------------
 // Chat tracking
 // ---------------------------------------------------------------------------
+spindle.on('CHAT_SWITCHED', (payload: any) => {
+  const chatId = payload.chatId ?? null
+  activeChatId = chatId
+
+  spindle.sendToFrontend({
+    type: 'chat_changed',
+    chatId,
+    snapshots: chatId ? store.getAll(chatId) : [],
+  })
+})
+
 spindle.on('CHAT_CHANGED', async (payload: any) => {
   const chatId = payload.chatId ?? payload.chat?.id
   if (chatId) {
-    const previousChatId = activeChatId
     activeChatId = chatId
-
-    // Check if previous chat was deleted
-    if (previousChatId && previousChatId !== chatId) {
-      try {
-        const prev = await spindle.chats.get(previousChatId)
-        if (!prev) store.clearChat(previousChatId)
-      } catch {
-        // API error — assume deleted to be safe
-        store.clearChat(previousChatId)
-      }
-    }
 
     spindle.sendToFrontend({
       type: 'chat_changed',
@@ -217,6 +262,8 @@ spindle.on('GENERATION_ENDED', async (payload: any) => {
   }
   if (!payload.chatId || !payload.messageId) return
 
+  // If generation ended with an error but has a messageId, partial content
+  // was persisted (post-1c6563a behavior). Still link it.
   try {
     const messages = await spindle.chat.getMessages(payload.chatId)
     const index = messages.findIndex((m: any) => m.id === payload.messageId)
@@ -233,9 +280,44 @@ spindle.on('GENERATION_ENDED', async (payload: any) => {
 })
 
 spindle.on('GENERATION_STOPPED', (payload: any) => {
-  if (payload.generationId) {
-    activeGenerations.delete(payload.generationId)
-    generationMeta.delete(payload.generationId)
+  const genId = payload.generationId
+  if (genId) {
+    activeGenerations.delete(genId)
+    generationMeta.delete(genId)
+
+    // Mark the snapshot as aborted so the UI can show it
+    const snap = store.markAborted(genId)
+    if (snap) {
+      spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: snap })
+    }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Swipe discrimination — MESSAGE_SWIPED fires after GENERATION_ENDED for
+// swipe operations, letting us retroactively tag the snapshot as a swipe
+// rather than a plain regen.
+// ---------------------------------------------------------------------------
+spindle.on('MESSAGE_SWIPED', (payload: any) => {
+  if (payload.action !== 'added') return
+  const chatId = payload.chatId
+  if (!chatId) return
+
+  const messageId = payload.message?.id
+  const snap = store.tagAsSwipe(chatId, messageId, payload.swipeId)
+  if (snap) {
+    spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: snap })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Chat and message lifecycle
+// ---------------------------------------------------------------------------
+spindle.on('CHAT_DELETED', (payload: any) => {
+  const chatId = payload.chatId
+  if (chatId) {
+    store.clearChat(chatId)
+    if (activeChatId === chatId) activeChatId = null
   }
 })
 
@@ -261,7 +343,6 @@ spindle.on('MESSAGE_DELETED', async (payload: any) => {
       const snapshots = store.getAll(chatId)
       for (const snap of snapshots) {
         if (snap.messageId && !currentIds.has(snap.messageId)) {
-          // This snapshot's linked message no longer exists — remove it
           store.deleteByMessageId(snap.messageId)
           removed++
         }
