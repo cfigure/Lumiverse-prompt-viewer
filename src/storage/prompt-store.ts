@@ -4,7 +4,7 @@
 
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string | Array<{ type: string; text?: string; [key: string]: unknown }>
+  content: string
   name?: string
 }
 
@@ -37,6 +37,10 @@ export interface PromptSnapshot {
   swipeIndex?: number
   /** True if the generation was aborted/stopped but partial content was saved */
   wasAborted?: boolean
+  /** True if token count is a chars/4 estimate rather than proper tokenizer count */
+  approximateTokens?: boolean
+  /** Name of the tokenizer used for the count, if available */
+  tokenizer?: string
 }
 
 export class PromptStore {
