@@ -18,6 +18,7 @@ interface Settings {
   defaultViewMode: 'formatted' | 'raw' | 'rendered'
   showDryRunsByDefault: boolean
   dryRunMode: 'only' | 'alongside'
+  showWorldInfo: boolean
   maxHistoryPerChat: number
 }
 
@@ -25,6 +26,7 @@ const DEFAULT_SETTINGS: Settings = {
   defaultViewMode: 'formatted',
   showDryRunsByDefault: false,
   dryRunMode: 'only',
+  showWorldInfo: true,
   maxHistoryPerChat: 50,
 }
 
