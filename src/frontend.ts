@@ -7,7 +7,7 @@ import { PANEL_CSS } from './components/styles'
 
 interface LlmMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string | Array<{ type: string; text?: string; [key: string]: unknown }>
+  content: string
   name?: string
 }
 
@@ -27,6 +27,8 @@ interface PromptSnapshot {
   isSwipe?: boolean
   swipeIndex?: number
   wasAborted?: boolean
+  approximateTokens?: boolean
+  tokenizer?: string
 }
 
 interface Settings {
@@ -48,12 +50,8 @@ const GATED_PERMISSIONS = ['interceptor', 'generation', 'chat_mutation', 'chats'
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function msgText(content: LlmMessage['content']): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content.filter((p) => p.type === 'text' && typeof p.text === 'string').map((p) => p.text!).join('')
-  }
-  return ''
+function msgText(content: string): string {
+  return content ?? ''
 }
 
 function formatTime(ts: number): string {
@@ -237,20 +235,15 @@ export function setup(ctx: SpindleFrontendContext) {
   })
 
   // React to permission changes in real-time
-  // Listen to both event names for compatibility across Lumiverse versions
   function handlePermissionChanged(payload: any): void {
-    // Current API shape: { permission, granted, allGranted }
-    // Legacy shape: { extensionId, permission, granted }
-    // If extensionId is present and doesn't match us, ignore
-    if (payload.extensionId && payload.extensionId !== ctx.manifest.identifier) return
+    // API shape: { permission, granted, allGranted }
     if (payload.granted) {
       // Permission was just granted — refresh data
       ctx.sendToBackend({ type: 'get_history' })
     }
   }
   const unsubPermissionNew = ctx.events.on('PERMISSION_CHANGED', handlePermissionChanged)
-  const unsubPermissionLegacy = ctx.events.on('SPINDLE_PERMISSION_CHANGED', handlePermissionChanged)
-  cleanups.push(unsubPermissionNew, unsubPermissionLegacy)
+  cleanups.push(unsubPermissionNew)
 
   // ---- Settings mount ----
   const settingsMount = ctx.ui.mount('settings_extensions')
@@ -338,16 +331,48 @@ export function setup(ctx: SpindleFrontendContext) {
     // Use isSwipe flag to override the label when we know it's a swipe
     const rawGenType = String(meta.generationType ?? '')
     const genType = snap.isSwipe ? 'Swipe' : genTypeLabel(rawGenType)
-    const worldInfoCount = Array.isArray(meta.activatedWorldInfo) ? meta.activatedWorldInfo.length : 0
+    const worldInfoArr = Array.isArray(meta.activatedWorldInfo) ? meta.activatedWorldInfo as any[] : []
+    const keywordEntries = worldInfoArr.filter((e) => e.source != null && e.source !== 'vector')
+    const vectorEntries = worldInfoArr.filter((e) => e.source === 'vector')
+    // Entries without a source field at all — may indicate a schema change
+    const unknownEntries = worldInfoArr.filter((e) => e.source == null)
+
+    let worldInfoLine: string | null = null
+    if (worldInfoArr.length > 0) {
+      const parts: string[] = []
+      if (keywordEntries.length > 0) parts.push(`${keywordEntries.length} keyword`)
+      if (vectorEntries.length > 0) parts.push(`${vectorEntries.length} vector`)
+      if (unknownEntries.length > 0) parts.push(`${unknownEntries.length} untyped`)
+      worldInfoLine = `World Info: ${worldInfoArr.length} entries (${parts.join(', ')})`
+    }
+
     ctxBlock.textContent = [
       `Generation: ${genType}${snap.swipeIndex != null ? ` #${snap.swipeIndex}` : ''}${snap.wasAborted ? ' (aborted)' : ''}`,
       `Chat: ${meta.chatId ?? '?'}`,
       `Connection: ${meta.connectionId ?? '?'}`,
       `Persona: ${meta.personaId ?? '?'}`,
       snap.model ? `Model: ${snap.model}` : null,
-      worldInfoCount > 0 ? `World Info entries: ${worldInfoCount}` : null,
+      worldInfoLine,
     ].filter(Boolean).join('\n')
     messagesEl.appendChild(ctxBlock)
+
+    // Show individual world info entries if any
+    if (worldInfoArr.length > 0) {
+      const wiBlock = document.createElement('div')
+      wiBlock.className = 'pv-context-block pv-wi-block'
+      wiBlock.textContent = worldInfoArr.map((e: any) => {
+        // Determine source type — handle missing or renamed fields
+        const src = e.source === 'vector'
+          ? `vector (${typeof e.score === 'number' ? e.score.toFixed(4) : '?'})`
+          : e.source != null ? String(e.source) : 'unknown'
+        const name = e.comment || e.name || e.title || '(unnamed)'
+        const keys = Array.isArray(e.keys)
+          ? e.keys.join(', ')
+          : Array.isArray(e.keywords) ? e.keywords.join(', ') : ''
+        return `[${src}] ${name}${keys ? ` — keys: ${keys}` : ''}`
+      }).join('\n')
+      messagesEl.appendChild(wiBlock)
+    }
 
     // Show regen feedback if present
     if (snap.regenFeedback) {
@@ -397,9 +422,10 @@ export function setup(ctx: SpindleFrontendContext) {
     rendered.className = 'pv-rendered'
     snap.messages.forEach((msg) => {
       if (!msg.content) return
+      const text = msgText(msg.content)
       const block = document.createElement('div')
       block.className = 'pv-rendered-block'
-      block.innerHTML = msg.content
+      block.innerHTML = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -429,7 +455,9 @@ export function setup(ctx: SpindleFrontendContext) {
     const msgLabel = snap.messageNumber ? `Msg #${snap.messageNumber} · ` : ''
     const swipeLabel = snap.swipeIndex != null ? `Swipe #${snap.swipeIndex} · ` : ''
     const apiLabel = snap.model ? `${snap.model} · ` : ''
-    status.textContent = `${dryLabel}${abortLabel}${msgLabel}${swipeLabel}${apiLabel}${snap.messages.length} messages · ~${snap.estimatedTokens} tok · ${formatTime(snap.timestamp)}`
+    const tokPrefix = snap.approximateTokens === false ? '' : '~'
+    const tokSuffix = snap.tokenizer ? ` (${snap.tokenizer})` : ''
+    status.textContent = `${dryLabel}${abortLabel}${msgLabel}${swipeLabel}${apiLabel}${snap.messages.length} messages · ${tokPrefix}${snap.estimatedTokens} tok${tokSuffix} · ${formatTime(snap.timestamp)}`
   }
 
   function getFilteredHistory(): PromptSnapshot[] {
@@ -653,15 +681,6 @@ export function setup(ctx: SpindleFrontendContext) {
     }
   })
   cleanups.push(unsubChatSwitched)
-
-  const unsubChatChanged = ctx.events.on('CHAT_CHANGED', (payload: any) => {
-    const chatId = payload.chatId ?? payload.chat?.id
-    if (chatId && chatId !== currentChatId) {
-      currentChatId = chatId
-      ctx.sendToBackend({ type: 'set_active_chat', chatId })
-    }
-  })
-  cleanups.push(unsubChatChanged)
 
   // ---- Initial fetch ----
   ctx.sendToBackend({ type: 'get_history' })
