@@ -35,6 +35,7 @@ interface Settings {
   defaultViewMode: 'formatted' | 'raw' | 'rendered'
   showDryRunsByDefault: boolean
   dryRunMode: 'only' | 'alongside'
+  showWorldInfo: boolean
   maxHistoryPerChat: number
 }
 
@@ -42,6 +43,7 @@ const DEFAULT_SETTINGS: Settings = {
   defaultViewMode: 'formatted',
   showDryRunsByDefault: false,
   dryRunMode: 'only',
+  showWorldInfo: true,
   maxHistoryPerChat: 50,
 }
 
@@ -160,6 +162,12 @@ function createSettingsUI(
   }
   addRow('Dry run display', dryModeSelect)
 
+  // Show world info
+  const wiCheck = document.createElement('input')
+  wiCheck.type = 'checkbox'
+  wiCheck.checked = currentSettings.showWorldInfo
+  addRow('Show World Info entries', wiCheck)
+
   // Max history
   const maxInput = document.createElement('input')
   maxInput.className = 'pv-settings-input'
@@ -184,6 +192,7 @@ function createSettingsUI(
       defaultViewMode: viewSelect.value as Settings['defaultViewMode'],
       showDryRunsByDefault: dryCheck.checked,
       dryRunMode: dryModeSelect.value as Settings['dryRunMode'],
+      showWorldInfo: wiCheck.checked,
       maxHistoryPerChat: Math.min(500, Math.max(5, parseInt(maxInput.value) || 50)),
     })
     saveBtn.textContent = '✓ Saved'
@@ -197,6 +206,7 @@ function createSettingsUI(
     viewSelect.value = s.defaultViewMode
     dryCheck.checked = s.showDryRunsByDefault
     dryModeSelect.value = s.dryRunMode
+    wiCheck.checked = s.showWorldInfo
     maxInput.value = String(s.maxHistoryPerChat)
   }
 
@@ -357,7 +367,7 @@ export function setup(ctx: SpindleFrontendContext) {
     messagesEl.appendChild(ctxBlock)
 
     // Show individual world info entries if any
-    if (worldInfoArr.length > 0) {
+    if (worldInfoArr.length > 0 && settings.showWorldInfo) {
       const wiBlock = document.createElement('div')
       wiBlock.className = 'pv-context-block pv-wi-block'
       wiBlock.textContent = worldInfoArr.map((e: any) => {
