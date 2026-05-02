@@ -1,0 +1,12 @@
+{
+  "version": "1.0.6",
+  "name": "Prompt Viewer",
+  "identifier": "prompt_viewer",
+  "author": "cfigure",
+  "github": "https://github.com/cfigure/Lumiverse-prompt-viewer",
+  "homepage": "https://github.com/cfigure/Lumiverse-prompt-viewer",
+  "description": "Inspect the fully assembled prompt after it has been sent to the LLM.",
+  "permissions": ["interceptor", "generation", "chat_mutation", "chats"],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js"
+}
