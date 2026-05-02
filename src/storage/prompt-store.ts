@@ -27,8 +27,13 @@ export interface PromptSnapshot {
   messageNumber?: number
   isDryRun?: boolean
   model?: string
-  /** OOC feedback text extracted from a regen-with-feedback generation */
+  /** OOC feedback text extracted from a regen-with-feedback generation
+   *  (inner text only, no `[OOC: ]` wrapping). Used for clipboard / programmatic access. */
   regenFeedback?: string
+  /** Raw matched marker including the `[OOC: ]` wrapper, exactly as it appeared
+   *  in the assembled messages. Used for inline display so the banner mirrors
+   *  what's actually in the prompt. */
+  regenFeedbackRaw?: string
   /** Where the OOC was injected: 'system' (own message) or 'user' (appended to last user msg) */
   regenFeedbackPosition?: 'system' | 'user'
   /** True if this generation was a swipe (distinguished from plain regen via MESSAGE_SWIPED) */
@@ -55,10 +60,6 @@ export class PromptStore {
         this.chats.set(chatId, arr.slice(arr.length - this.maxPerChat))
       }
     }
-  }
-
-  getMaxPerChat(): number {
-    return this.maxPerChat
   }
 
   private getChat(chatId: string): PromptSnapshot[] {
@@ -127,28 +128,8 @@ export class PromptStore {
     return removed
   }
 
-  /** Delete snapshots whose linked messageNumber matches, for any chat */
-  deleteByMessageNumber(chatId: string, messageNumber: number): number {
-    const arr = this.chats.get(chatId)
-    if (!arr) return 0
-    const before = arr.length
-    const filtered = arr.filter((s) => s.messageNumber !== messageNumber)
-    if (filtered.length < before) {
-      this.chats.set(chatId, filtered)
-    }
-    return before - filtered.length
-  }
-
   clearChat(chatId: string): void {
     this.chats.delete(chatId)
-  }
-
-  clearAll(): void {
-    this.chats.clear()
-  }
-
-  count(chatId: string): number {
-    return this.getChat(chatId).length
   }
 
   /** Tag a snapshot as a swipe by messageId, falling back to most recent regen */

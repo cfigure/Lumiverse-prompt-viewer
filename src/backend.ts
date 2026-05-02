@@ -19,6 +19,7 @@ interface Settings {
   showDryRunsByDefault: boolean
   dryRunMode: 'only' | 'alongside'
   showWorldInfo: boolean
+  showRegenFeedback: boolean
   maxHistoryPerChat: number
 }
 
@@ -27,6 +28,7 @@ const DEFAULT_SETTINGS: Settings = {
   showDryRunsByDefault: false,
   dryRunMode: 'only',
   showWorldInfo: true,
+  showRegenFeedback: true,
   maxHistoryPerChat: 50,
 }
 
@@ -56,7 +58,90 @@ async function saveSettings(settings: Settings): Promise<void> {
 // Content helper — LlmMessageDTO.content is always a string
 // ---------------------------------------------------------------------------
 function messageText(content: string): string {
-  return content ?? ''
+  return typeof content === 'string' ? content : ''
+}
+
+// ---------------------------------------------------------------------------
+// Regen feedback detector
+//
+// Inspects the assembled messages for the `[OOC: ...]` marker that the
+// Lumiverse prompt assembler injects when the user supplies feedback in the
+// regen modal. Detection is intentionally NOT gated on generationType:
+//
+//   - swipe button / swipe arrow → generationType: 'regenerate'
+//   - composer regen button       → generationType: 'normal' (Lumiverse does
+//                                   not distinguish this from a fresh send)
+//   - explicit swipe-add path     → generationType: 'swipe'
+//
+// Because the composer-regen path arrives as 'normal', gating on type would
+// silently suppress the banner there. The OOC marker itself is a stable signal
+// — present iff the user supplied feedback — so we trust it on every path.
+//
+// Matching rules mirror prompt-assembly.service.ts:2150-2208 exactly:
+//   - 'system' position: a trailing system-role message whose ENTIRE content
+//                        matches `^[OOC: <body>]$` with no leading/trailing
+//                        whitespace.
+//   - 'user'   position: a trailing user-role message whose content ENDS
+//                        with `\n[OOC: <body>]`. The newline separator is
+//                        required to avoid catching brackets that happen to
+//                        appear at the end of a user-authored sentence.
+//
+// `<body>` is non-greedy across newlines so multi-line feedback is captured.
+// We anchor strictly to the end-of-string so additional content after the
+// closing bracket disqualifies the match (defensive — assembler doesn't
+// produce that today).
+//
+// CAVEAT: a user who types `\n[OOC: ...]` at the end of their own message
+// (without using the regen modal) will trigger detection. This matches what
+// the native Prompt Breakdown does — prompt-assembly tags any such injection
+// as a "Regen Feedback" utility entry regardless of source. We can't be more
+// truthful than the host here.
+// ---------------------------------------------------------------------------
+const SYSTEM_OOC_RE = /^(\[OOC:\s*([\s\S]*?)\])$/
+const TRAILING_USER_OOC_RE = /\n(\[OOC:\s*([\s\S]*?)\])$/
+
+interface RegenFeedbackDetection {
+  /** Inner text only (body between `[OOC:` and `]`, trimmed). */
+  text: string
+  /** Raw matched marker including `[OOC: ]` wrapper, exactly as injected. */
+  raw: string
+  /** Which slot the marker appeared in. Detection-driven, not user-setting-driven. */
+  position: 'system' | 'user'
+}
+
+function detectRegenFeedback(messages: LlmMessage[]): RegenFeedbackDetection | null {
+  if (!messages.length) return null
+
+  // Walk backwards from the end. The assembler injects at the tail in both
+  // positions, and on regen/swipe paths nothing further mutates the tail
+  // before the interceptor runs.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    const content = messageText(msg.content)
+    if (!content) continue
+
+    if (msg.role === 'system') {
+      const m = SYSTEM_OOC_RE.exec(content)
+      if (m) return { text: m[2].trim(), raw: m[1], position: 'system' }
+      // A system message that ISN'T a pure OOC marker is fine — keep walking.
+      // The assembler can leave other system messages at the tail (e.g.
+      // depth-injected blocks), so non-match here is not a stop condition.
+      continue
+    }
+
+    if (msg.role === 'user') {
+      const m = TRAILING_USER_OOC_RE.exec(content)
+      if (m) return { text: m[2].trim(), raw: m[1], position: 'user' }
+      // Tail user message without the marker: feedback wasn't injected
+      // in 'user' position. Stop — looking further back would risk picking
+      // up older OOC text from earlier turns.
+      return null
+    }
+
+    // assistant or other roles — skip and keep looking
+  }
+
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -107,28 +192,6 @@ const activeGenerations = new Set<string>()
 const generationMeta = new Map<string, { model: string }>()
 
 // ---------------------------------------------------------------------------
-// OOC / regen feedback extraction
-// ---------------------------------------------------------------------------
-const OOC_PATTERN = /\[OOC:\s*([\s\S]*?)\]\s*$/
-
-function extractRegenFeedback(
-  messages: LlmMessage[],
-): { feedback: string; position: 'system' | 'user' } | null {
-  for (let i = messages.length - 1; i >= Math.max(0, messages.length - 4); i--) {
-    const msg = messages[i]
-    const text = messageText(msg.content)
-    const match = text.match(OOC_PATTERN)
-    if (match) {
-      return {
-        feedback: match[1].trim(),
-        position: msg.role === 'system' ? 'system' : 'user',
-      }
-    }
-  }
-  return null
-}
-
-// ---------------------------------------------------------------------------
 // Permission-gated feature registration
 //
 // Generation events and the interceptor require gated permissions. If we
@@ -175,11 +238,14 @@ function tryRegisterInterceptor(): void {
         spindle.sendToFrontend({ type: 'snapshot_updated', snapshot })
       })
 
-      // Extract OOC regen feedback if present
-      const ooc = extractRegenFeedback(messages as LlmMessage[])
-      if (ooc) {
-        snapshot.regenFeedback = ooc.feedback
-        snapshot.regenFeedbackPosition = ooc.position
+      // OOC marker detection. Runs unconditionally (no generationType gate)
+      // so composer-regen, swipe, and the explicit regenerate path all
+      // surface the banner. See detectRegenFeedback() for caveats.
+      const detected = detectRegenFeedback(messages as LlmMessage[])
+      if (detected) {
+        snapshot.regenFeedback = detected.text
+        snapshot.regenFeedbackRaw = detected.raw
+        snapshot.regenFeedbackPosition = detected.position
       }
 
       store.push(snapshot)
@@ -224,7 +290,7 @@ function tryRegisterGenerationEvents(): void {
     try {
       const messages = await spindle.chat.getMessages(payload.chatId)
       const index = messages.findIndex((m: any) => m.id === payload.messageId)
-      const msgNum = index !== -1 ? index + 1 : undefined
+      const msgNum = index !== -1 ? index : undefined
       store.linkMessage(payload.chatId, payload.messageId, msgNum, genId)
 
       const updated = store.getAll(payload.chatId).find((s) => s.messageId === payload.messageId)
@@ -361,14 +427,6 @@ spindle.onFrontendMessage(async (payload: any, userId: string) => {
     case 'clear_history':
       if (chatId) store.clearChat(chatId)
       spindle.sendToFrontend({ type: 'history_cleared' })
-      break
-
-    case 'set_active_chat':
-      activeChatId = payload.chatId
-      spindle.sendToFrontend({
-        type: 'prompt_history',
-        snapshots: payload.chatId ? store.getAll(payload.chatId) : [],
-      })
       break
 
     case 'get_settings': {

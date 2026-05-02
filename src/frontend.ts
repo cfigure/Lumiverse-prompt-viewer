@@ -23,6 +23,7 @@ interface PromptSnapshot {
   isDryRun?: boolean
   model?: string
   regenFeedback?: string
+  regenFeedbackRaw?: string
   regenFeedbackPosition?: 'system' | 'user'
   isSwipe?: boolean
   swipeIndex?: number
@@ -36,6 +37,7 @@ interface Settings {
   showDryRunsByDefault: boolean
   dryRunMode: 'only' | 'alongside'
   showWorldInfo: boolean
+  showRegenFeedback: boolean
   maxHistoryPerChat: number
 }
 
@@ -44,6 +46,7 @@ const DEFAULT_SETTINGS: Settings = {
   showDryRunsByDefault: false,
   dryRunMode: 'only',
   showWorldInfo: true,
+  showRegenFeedback: true,
   maxHistoryPerChat: 50,
 }
 
@@ -168,6 +171,12 @@ function createSettingsUI(
   wiCheck.checked = currentSettings.showWorldInfo
   addRow('Show World Info entries', wiCheck)
 
+  // Show regen feedback banner
+  const regenCheck = document.createElement('input')
+  regenCheck.type = 'checkbox'
+  regenCheck.checked = currentSettings.showRegenFeedback
+  addRow('Show Regen Feedback at top', regenCheck)
+
   // Max history
   const maxInput = document.createElement('input')
   maxInput.className = 'pv-settings-input'
@@ -193,6 +202,7 @@ function createSettingsUI(
       showDryRunsByDefault: dryCheck.checked,
       dryRunMode: dryModeSelect.value as Settings['dryRunMode'],
       showWorldInfo: wiCheck.checked,
+      showRegenFeedback: regenCheck.checked,
       maxHistoryPerChat: Math.min(500, Math.max(5, parseInt(maxInput.value) || 50)),
     })
     saveBtn.textContent = '✓ Saved'
@@ -207,6 +217,7 @@ function createSettingsUI(
     dryCheck.checked = s.showDryRunsByDefault
     dryModeSelect.value = s.dryRunMode
     wiCheck.checked = s.showWorldInfo
+    regenCheck.checked = s.showRegenFeedback
     maxInput.value = String(s.maxHistoryPerChat)
   }
 
@@ -342,6 +353,19 @@ export function setup(ctx: SpindleFrontendContext) {
     const rawGenType = String(meta.generationType ?? '')
     const genType = snap.isSwipe ? 'Swipe' : genTypeLabel(rawGenType)
     const worldInfoArr = Array.isArray(meta.activatedWorldInfo) ? meta.activatedWorldInfo as any[] : []
+
+    // Sort for display: vector entries first (by score descending), then keyword, then untyped
+    const sortedWorldInfo = [...worldInfoArr].sort((a, b) => {
+      const aIsVector = a.source === 'vector' ? 0 : a.source != null ? 1 : 2
+      const bIsVector = b.source === 'vector' ? 0 : b.source != null ? 1 : 2
+      if (aIsVector !== bIsVector) return aIsVector - bIsVector
+      // Within vector entries, sort by score descending
+      if (aIsVector === 0 && bIsVector === 0) {
+        return (typeof b.score === 'number' ? b.score : 0) - (typeof a.score === 'number' ? a.score : 0)
+      }
+      return 0
+    })
+
     const keywordEntries = worldInfoArr.filter((e) => e.source != null && e.source !== 'vector')
     const vectorEntries = worldInfoArr.filter((e) => e.source === 'vector')
     // Entries without a source field at all — may indicate a schema change
@@ -354,6 +378,27 @@ export function setup(ctx: SpindleFrontendContext) {
       if (vectorEntries.length > 0) parts.push(`${vectorEntries.length} vector`)
       if (unknownEntries.length > 0) parts.push(`${unknownEntries.length} untyped`)
       worldInfoLine = `World Info: ${worldInfoArr.length} entries (${parts.join(', ')})`
+    }
+
+    // Regen Feedback banner — mirrors the native Prompt Breakdown's two-line
+    // layout: "Regen Feedback" heading on top, raw `[OOC: ...]` content below.
+    // Uses the raw matched string so the banner shows exactly what was injected
+    // into the assembled prompt (rather than reconstructing it from inner text).
+    // Position label reflects the slot the OOC marker actually occupies in the
+    // assembled prompt — see detectRegenFeedback() in backend.ts.
+    if (snap.regenFeedback && settings.showRegenFeedback) {
+      const oocBanner = document.createElement('div')
+      oocBanner.className = 'pv-context-block pv-ooc-block'
+      const heading = document.createElement('div')
+      heading.className = 'pv-ooc-heading'
+      heading.textContent = snap.regenFeedbackPosition
+        ? `Regen Feedback (${snap.regenFeedbackPosition})`
+        : 'Regen Feedback'
+      const body = document.createElement('div')
+      body.className = 'pv-ooc-body'
+      body.textContent = snap.regenFeedbackRaw ?? `[OOC: ${snap.regenFeedback}]`
+      oocBanner.append(heading, body)
+      messagesEl.appendChild(oocBanner)
     }
 
     ctxBlock.textContent = [
@@ -370,7 +415,7 @@ export function setup(ctx: SpindleFrontendContext) {
     if (worldInfoArr.length > 0 && settings.showWorldInfo) {
       const wiBlock = document.createElement('div')
       wiBlock.className = 'pv-context-block pv-wi-block'
-      wiBlock.textContent = worldInfoArr.map((e: any) => {
+      wiBlock.textContent = sortedWorldInfo.map((e: any) => {
         // Determine source type — handle missing or renamed fields
         const src = e.source === 'vector'
           ? `vector (${typeof e.score === 'number' ? e.score.toFixed(4) : '?'})`
@@ -382,14 +427,6 @@ export function setup(ctx: SpindleFrontendContext) {
         return `[${src}] ${name}${keys ? ` — keys: ${keys}` : ''}`
       }).join('\n')
       messagesEl.appendChild(wiBlock)
-    }
-
-    // Show regen feedback if present
-    if (snap.regenFeedback) {
-      const oocBlock = document.createElement('div')
-      oocBlock.className = 'pv-context-block pv-ooc-block'
-      oocBlock.textContent = `OOC Feedback (${snap.regenFeedbackPosition ?? 'user'}): ${snap.regenFeedback}`
-      messagesEl.appendChild(oocBlock)
     }
 
     snap.messages.forEach((msg, i) => {
@@ -462,7 +499,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const dryLabel = snap.isDryRun ? '[DRY RUN] ' : ''
     const abortLabel = snap.wasAborted ? '[ABORTED] ' : ''
-    const msgLabel = snap.messageNumber ? `Msg #${snap.messageNumber} · ` : ''
+    const msgLabel = snap.messageNumber != null ? `Msg #${snap.messageNumber} · ` : ''
     const swipeLabel = snap.swipeIndex != null ? `Swipe #${snap.swipeIndex} · ` : ''
     const apiLabel = snap.model ? `${snap.model} · ` : ''
     const tokPrefix = snap.approximateTokens === false ? '' : '~'
@@ -496,9 +533,9 @@ export function setup(ctx: SpindleFrontendContext) {
       const rawGt = String((snap.context as any)?.generationType ?? '')
       const gt = snap.isSwipe ? 'Swipe' : genTypeLabel(rawGt)
       const swipeLabel = snap.swipeIndex != null ? `sw${snap.swipeIndex}` : ''
-      const msgLabel = snap.messageNumber ? `#${snap.messageNumber}` : ''
+      const msgLabel = snap.messageNumber != null ? `#${snap.messageNumber}` : ''
       const locator = [msgLabel, swipeLabel].filter(Boolean).join('/')
-      opt.textContent = `${prefix}${dryTag}${oocTag}${abortTag}${locator ? locator + ' · ' : ''}${formatTime(snap.timestamp)} · ${gt} · ${snap.messages.length} msgs`
+      opt.textContent = `${prefix}${dryTag}${abortTag}${oocTag}${locator ? locator + ' · ' : ''}${formatTime(snap.timestamp)} · ${gt} · ${snap.messages.length} msgs`
       select.appendChild(opt)
     })
   }
@@ -675,22 +712,6 @@ export function setup(ctx: SpindleFrontendContext) {
     }
   })
   cleanups.push(unsubBackend)
-
-  // ---- Chat switch ----
-  const unsubChatSwitched = ctx.events.on('CHAT_SWITCHED', (payload: any) => {
-    const chatId = payload.chatId ?? null
-    currentChatId = chatId
-    if (chatId) {
-      ctx.sendToBackend({ type: 'set_active_chat', chatId })
-    } else {
-      // User went to home screen
-      history = []
-      populateSelect()
-      renderSnapshot(null)
-      updateBadge()
-    }
-  })
-  cleanups.push(unsubChatSwitched)
 
   // ---- Initial fetch ----
   ctx.sendToBackend({ type: 'get_history' })

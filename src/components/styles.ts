@@ -123,6 +123,24 @@ export const PANEL_CSS = /* css */ `
     background: color-mix(in srgb, var(--lumiverse-fill-subtle) 85%, hsl(35, 60%, 40%));
     color: hsl(35, 55%, 70%);
   }
+  .pv-ooc-heading {
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: hsl(35, 65%, 78%);
+  }
+  .pv-ooc-body {
+    font-family: monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* ---- World Info entries block ---- */
+  .pv-wi-block {
+    border-color: color-mix(in srgb, var(--lumiverse-border) 50%, hsl(200, 60%, 50%));
+    background: color-mix(in srgb, var(--lumiverse-fill-subtle) 85%, hsl(200, 40%, 35%));
+    color: hsl(200, 45%, 70%);
+    max-height: 200px;
+  }
 
   /* ---- Aborted generation indicator ---- */
   .pv-role-system .pv-message-header.pv-aborted,
