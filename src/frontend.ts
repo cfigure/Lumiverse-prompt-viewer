@@ -5,11 +5,20 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
 import { PANEL_CSS } from './components/styles'
 
+type LlmMessagePartDTO =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data?: string; mime_type?: string }
+  | { type: 'audio'; data?: string; mime_type?: string }
+  | { type: 'tool_use'; id?: string; name?: string; input?: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id?: string; content?: string; is_error?: boolean }
+
 interface LlmMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string | LlmMessagePartDTO[]
   name?: string
 }
+
+type TokenCountSource = 'native' | 'native_approximate' | 'fallback'
 
 interface PromptSnapshot {
   id: string
@@ -29,7 +38,11 @@ interface PromptSnapshot {
   swipeIndex?: number
   wasAborted?: boolean
   approximateTokens?: boolean
+  tokenCountSource?: TokenCountSource
+  tokenModel?: string
+  tokenModelSource?: 'main' | 'sidecar' | 'explicit'
   tokenizer?: string
+  tokenizerError?: string
 }
 
 interface Settings {
@@ -39,6 +52,7 @@ interface Settings {
   showWorldInfo: boolean
   showRegenFeedback: boolean
   maxHistoryPerChat: number
+  showTokenizerSource: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -48,6 +62,7 @@ const DEFAULT_SETTINGS: Settings = {
   showWorldInfo: true,
   showRegenFeedback: true,
   maxHistoryPerChat: 50,
+  showTokenizerSource: true,
 }
 
 const GATED_PERMISSIONS = ['interceptor', 'generation', 'chat_mutation', 'chats']
@@ -55,8 +70,27 @@ const GATED_PERMISSIONS = ['interceptor', 'generation', 'chat_mutation', 'chats'
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function msgText(content: string): string {
-  return content ?? ''
+function msgText(content: string | LlmMessagePartDTO[]): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+
+  return content.map((part) => {
+    if (!part || typeof part !== 'object') return ''
+    switch (part.type) {
+      case 'text':
+        return part.text ?? ''
+      case 'image':
+        return `[image${part.mime_type ? `: ${part.mime_type}` : ''}]`
+      case 'audio':
+        return `[audio${part.mime_type ? `: ${part.mime_type}` : ''}]`
+      case 'tool_use':
+        return `[tool_use${part.name ? `: ${part.name}` : ''}] ${JSON.stringify(part.input ?? {})}`
+      case 'tool_result':
+        return `[tool_result${part.is_error ? ' error' : ''}] ${part.content ?? ''}`
+      default:
+        return JSON.stringify(part)
+    }
+  }).filter(Boolean).join('\n')
 }
 
 function formatTime(ts: number): string {
@@ -77,6 +111,15 @@ function genTypeLabel(gt: string): string {
     quiet: 'Quiet',
   }
   return labels[gt] ?? gt
+}
+
+function tokenSourceLabel(snap: PromptSnapshot): string {
+  switch (snap.tokenCountSource) {
+    case 'native': return snap.tokenizer ? `native: ${snap.tokenizer}` : 'native'
+    case 'native_approximate': return snap.tokenizer ? `Lumiverse estimate: ${snap.tokenizer}` : 'Lumiverse estimate'
+    case 'fallback': return 'fallback estimate'
+    default: return snap.approximateTokens === false ? 'native' : 'estimate'
+  }
 }
 
 function copyToClipboard(text: string): void {
@@ -110,10 +153,17 @@ function fallbackCopy(text: string): void {
 // ---------------------------------------------------------------------------
 // Settings UI
 // ---------------------------------------------------------------------------
+type MountedHandle = { destroy?: () => void }
+
 function createSettingsUI(
+  ctx: SpindleFrontendContext,
   currentSettings: Settings,
-  onSave: (s: Settings) => void,
-): { root: HTMLElement; update: (s: Settings) => void } {
+  onChange: (s: Settings) => void,
+): { root: HTMLElement; update: (s: Settings) => void; destroy: () => void } {
+  let local = { ...currentSettings }
+  const handles: MountedHandle[] = []
+  const components = (ctx as any).components
+
   const root = document.createElement('div')
   root.className = 'pv-settings'
 
@@ -124,104 +174,144 @@ function createSettingsUI(
 
   const card = document.createElement('div')
   card.className = 'pv-settings-card'
-
-  function addRow(label: string, input: HTMLElement): void {
-    const row = document.createElement('div')
-    row.className = 'pv-settings-row'
-    const lbl = document.createElement('label')
-    lbl.className = 'pv-settings-label'
-    lbl.textContent = label
-    row.append(lbl, input)
-    card.appendChild(row)
-  }
-
-  // Default view mode
-  const viewSelect = document.createElement('select')
-  viewSelect.className = 'pv-settings-input'
-  for (const mode of ['formatted', 'raw', 'rendered'] as const) {
-    const opt = document.createElement('option')
-    opt.value = mode
-    opt.textContent = mode.charAt(0).toUpperCase() + mode.slice(1)
-    if (mode === currentSettings.defaultViewMode) opt.selected = true
-    viewSelect.appendChild(opt)
-  }
-  addRow('Default view mode', viewSelect)
-
-  // Show dry runs
-  const dryCheck = document.createElement('input')
-  dryCheck.type = 'checkbox'
-  dryCheck.checked = currentSettings.showDryRunsByDefault
-  addRow('Show dry runs by default', dryCheck)
-
-  // Dry run display mode
-  const dryModeSelect = document.createElement('select')
-  dryModeSelect.className = 'pv-settings-input'
-  for (const [value, label] of [['only', 'Dry runs only'], ['alongside', 'Alongside normal']] as const) {
-    const opt = document.createElement('option')
-    opt.value = value
-    opt.textContent = label
-    if (value === currentSettings.dryRunMode) opt.selected = true
-    dryModeSelect.appendChild(opt)
-  }
-  addRow('Dry run display', dryModeSelect)
-
-  // Show world info
-  const wiCheck = document.createElement('input')
-  wiCheck.type = 'checkbox'
-  wiCheck.checked = currentSettings.showWorldInfo
-  addRow('Show World Info entries', wiCheck)
-
-  // Show regen feedback banner
-  const regenCheck = document.createElement('input')
-  regenCheck.type = 'checkbox'
-  regenCheck.checked = currentSettings.showRegenFeedback
-  addRow('Show Regen Feedback at top', regenCheck)
-
-  // Max history
-  const maxInput = document.createElement('input')
-  maxInput.className = 'pv-settings-input'
-  maxInput.type = 'number'
-  maxInput.min = '5'
-  maxInput.max = '500'
-  maxInput.value = String(currentSettings.maxHistoryPerChat)
-  addRow('Max prompts per chat', maxInput)
-
-  // Warning about max history
-  const note = document.createElement('div')
-  note.className = 'pv-settings-note'
-  note.textContent = 'Higher values use more memory. Prompt data is not persisted — history clears on restart. Values above 100 may cause performance issues with large prompts.'
-  card.appendChild(note)
-
-  // Save
-  const saveBtn = document.createElement('button')
-  saveBtn.className = 'pv-settings-save'
-  saveBtn.textContent = 'Save Settings'
-  saveBtn.addEventListener('click', () => {
-    onSave({
-      defaultViewMode: viewSelect.value as Settings['defaultViewMode'],
-      showDryRunsByDefault: dryCheck.checked,
-      dryRunMode: dryModeSelect.value as Settings['dryRunMode'],
-      showWorldInfo: wiCheck.checked,
-      showRegenFeedback: regenCheck.checked,
-      maxHistoryPerChat: Math.min(500, Math.max(5, parseInt(maxInput.value) || 50)),
-    })
-    saveBtn.textContent = '✓ Saved'
-    setTimeout(() => { saveBtn.textContent = 'Save Settings' }, 1500)
-  })
-  card.appendChild(saveBtn)
-
   root.appendChild(card)
 
-  function update(s: Settings): void {
-    viewSelect.value = s.defaultViewMode
-    dryCheck.checked = s.showDryRunsByDefault
-    dryModeSelect.value = s.dryRunMode
-    wiCheck.checked = s.showWorldInfo
-    regenCheck.checked = s.showRegenFeedback
-    maxInput.value = String(s.maxHistoryPerChat)
+  function destroyHandles(): void {
+    handles.splice(0).forEach((handle) => {
+      try { handle.destroy?.() } catch {}
+    })
   }
 
-  return { root, update }
+  function commit(patch: Partial<Settings>, status: HTMLElement): void {
+    local = { ...local, ...patch }
+    onChange(local)
+  }
+
+  function fallbackSelect<T extends string>(value: T, options: { value: T; label: string }[], onValue: (v: T) => void): HTMLSelectElement {
+    const sel = document.createElement('select')
+    sel.className = 'pv-settings-input'
+    for (const option of options) {
+      const opt = document.createElement('option')
+      opt.value = option.value
+      opt.textContent = option.label
+      if (option.value === value) opt.selected = true
+      sel.appendChild(opt)
+    }
+    sel.addEventListener('change', () => onValue(sel.value as T))
+    return sel
+  }
+
+  function build(): void {
+    destroyHandles()
+    card.textContent = ''
+
+    const status = document.createElement('div')
+    status.className = 'pv-settings-status'
+
+    function addRow(label: string, input: HTMLElement, hint?: string): void {
+      const row = document.createElement('div')
+      row.className = 'pv-settings-row'
+
+      const labelBlock = document.createElement('div')
+      labelBlock.className = 'pv-settings-label-block'
+
+      const lbl = document.createElement('label')
+      lbl.className = 'pv-settings-label'
+      lbl.textContent = label
+      labelBlock.appendChild(lbl)
+
+      if (hint) {
+        const h = document.createElement('div')
+        h.className = 'pv-settings-hint'
+        h.textContent = hint
+        labelBlock.appendChild(h)
+      }
+
+      const wrap = document.createElement('div')
+      wrap.className = 'pv-settings-control'
+      wrap.appendChild(input)
+
+      row.append(labelBlock, wrap)
+      card.appendChild(row)
+    }
+
+    function mountSelect<T extends string>(value: T, options: { value: T; label: string; sublabel?: string }[], onValue: (v: T) => void): HTMLElement {
+      const slot = document.createElement('div')
+      slot.className = 'pv-shared-slot'
+      slot.appendChild(fallbackSelect(value, options, onValue))
+      return slot
+    }
+
+    function mountSwitch(checked: boolean, label: string, onValue: (v: boolean) => void): HTMLElement {
+      const slot = document.createElement('div')
+      slot.className = 'pv-shared-slot'
+      if (components?.mountSwitch) {
+        handles.push(components.mountSwitch(slot, { checked, ariaLabel: label, onChange: onValue }))
+      } else {
+        const input = document.createElement('input')
+        input.type = 'checkbox'
+        input.checked = checked
+        input.addEventListener('change', () => onValue(input.checked))
+        slot.appendChild(input)
+      }
+      return slot
+    }
+
+    function mountStepper(value: number, onValue: (v: number) => void): HTMLElement {
+      const slot = document.createElement('div')
+      slot.className = 'pv-shared-slot'
+      if (components?.mountNumberStepper) {
+        handles.push(components.mountNumberStepper(slot, {
+          value,
+          min: 5,
+          max: 500,
+          step: 5,
+          integer: true,
+          onChange: (v: number | null) => onValue(Math.min(500, Math.max(5, v ?? 50))),
+        }))
+      } else {
+        const input = document.createElement('input')
+        input.className = 'pv-settings-input'
+        input.type = 'number'
+        input.min = '5'
+        input.max = '500'
+        input.value = String(value)
+        input.addEventListener('change', () => onValue(Math.min(500, Math.max(5, parseInt(input.value) || 50))))
+        slot.appendChild(input)
+      }
+      return slot
+    }
+
+    addRow('Default view mode', mountSelect(local.defaultViewMode, [
+      { value: 'formatted', label: 'Formatted' },
+      { value: 'raw', label: 'Raw' },
+      { value: 'rendered', label: 'Rendered' },
+    ], (value) => commit({ defaultViewMode: value }, status)))
+
+    addRow('Show dry runs by default', mountSwitch(local.showDryRunsByDefault, 'Show dry runs by default', (checked) => commit({ showDryRunsByDefault: checked }, status)))
+    addRow('Dry run display', mountSelect(local.dryRunMode, [
+      { value: 'only', label: 'Dry runs only' },
+      { value: 'alongside', label: 'Alongside normal prompts' },
+    ], (value) => commit({ dryRunMode: value }, status)))
+    addRow('Show World Info entries', mountSwitch(local.showWorldInfo, 'Show World Info entries', (checked) => commit({ showWorldInfo: checked }, status)))
+    addRow('Show Regen Feedback at top', mountSwitch(local.showRegenFeedback, 'Show Regen Feedback at top', (checked) => commit({ showRegenFeedback: checked }, status)))
+    addRow('Show tokenizer source', mountSwitch(local.showTokenizerSource, 'Show tokenizer source', (checked) => commit({ showTokenizerSource: checked }, status)))
+    addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
+    card.appendChild(status)
+  }
+
+  build()
+
+  function update(s: Settings): void {
+    local = { ...s }
+    build()
+  }
+
+  function destroy(): void {
+    destroyHandles()
+  }
+
+  return { root, update, destroy }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +329,16 @@ export function setup(ctx: SpindleFrontendContext) {
   let settings: Settings = { ...DEFAULT_SETTINGS }
   let viewMode: 'formatted' | 'raw' | 'rendered' = settings.defaultViewMode
   let showDryRuns = settings.showDryRunsByDefault
+  function backendPayload(payload: Record<string, unknown>): Record<string, unknown> {
+    return currentChatId ? { ...payload, chatId: currentChatId } : payload
+  }
+
+  try {
+    const active = ctx.getActiveChat?.()
+    currentChatId = active?.chatId ?? null
+  } catch {
+    currentChatId = null
+  }
 
   // ---- Permission request on startup ----
   ctx.permissions.getGranted().then((granted: string[]) => {
@@ -260,7 +360,7 @@ export function setup(ctx: SpindleFrontendContext) {
     // API shape: { permission, granted, allGranted }
     if (payload.granted) {
       // Permission was just granted — refresh data
-      ctx.sendToBackend({ type: 'get_history' })
+      ctx.sendToBackend(backendPayload({ type: 'get_history' }))
     }
   }
   const unsubPermissionNew = ctx.events.on('PERMISSION_CHANGED', handlePermissionChanged)
@@ -268,14 +368,19 @@ export function setup(ctx: SpindleFrontendContext) {
 
   // ---- Settings mount ----
   const settingsMount = ctx.ui.mount('settings_extensions')
-  const settingsUI = createSettingsUI(settings, (newSettings) => {
+  const settingsUI = createSettingsUI(ctx, settings, (newSettings) => {
     settings = newSettings
     viewMode = settings.defaultViewMode
     showDryRuns = settings.showDryRunsByDefault
     updateButtonStates()
+    populateSelect()
+    renderSnapshot(currentSnapshot)
+    updateBadge()
     ctx.sendToBackend({ type: 'save_settings', settings })
+    ctx.sendToBackend(backendPayload({ type: 'get_history' }))
   })
   settingsMount.appendChild(settingsUI.root)
+  cleanups.push(() => { settingsUI.destroy(); settingsUI.root.remove() })
 
   ctx.sendToBackend({ type: 'get_settings' })
 
@@ -294,7 +399,7 @@ export function setup(ctx: SpindleFrontendContext) {
   cleanups.push(() => tab.destroy())
 
   const unsubActivate = tab.onActivate(() => {
-    ctx.sendToBackend({ type: 'get_history' })
+    ctx.sendToBackend(backendPayload({ type: 'get_history' }))
   })
   cleanups.push(unsubActivate)
 
@@ -468,8 +573,8 @@ export function setup(ctx: SpindleFrontendContext) {
     const rendered = document.createElement('div')
     rendered.className = 'pv-rendered'
     snap.messages.forEach((msg) => {
-      if (!msg.content) return
       const text = msgText(msg.content)
+      if (!text) return
       const block = document.createElement('div')
       block.className = 'pv-rendered-block'
       block.innerHTML = text
@@ -503,8 +608,10 @@ export function setup(ctx: SpindleFrontendContext) {
     const swipeLabel = snap.swipeIndex != null ? `Swipe #${snap.swipeIndex} · ` : ''
     const apiLabel = snap.model ? `${snap.model} · ` : ''
     const tokPrefix = snap.approximateTokens === false ? '' : '~'
-    const tokSuffix = snap.tokenizer ? ` (${snap.tokenizer})` : ''
-    status.textContent = `${dryLabel}${abortLabel}${msgLabel}${swipeLabel}${apiLabel}${snap.messages.length} messages · ${tokPrefix}${snap.estimatedTokens} tok${tokSuffix} · ${formatTime(snap.timestamp)}`
+    const source = settings.showTokenizerSource ? ` · ${tokenSourceLabel(snap)}` : ''
+    status.textContent = `${dryLabel}${abortLabel}${msgLabel}${swipeLabel}${apiLabel}${snap.messages.length} messages · ${tokPrefix}${snap.estimatedTokens} tok${source} · ${formatTime(snap.timestamp)}`
+    if (snap.tokenizerError) status.title = `Native token count failed: ${snap.tokenizerError}`
+    else status.title = snap.tokenModel ? `Token model: ${snap.tokenModel}${snap.tokenModelSource ? ` (${snap.tokenModelSource})` : ''}` : ''
   }
 
   function getFilteredHistory(): PromptSnapshot[] {
@@ -560,7 +667,7 @@ export function setup(ctx: SpindleFrontendContext) {
     renderSnapshot(snap)
   })
 
-  refreshBtn.addEventListener('click', () => ctx.sendToBackend({ type: 'get_history' }))
+  refreshBtn.addEventListener('click', () => ctx.sendToBackend(backendPayload({ type: 'get_history' })))
 
   settingsBtn.addEventListener('click', () => {
     ctx.events.emit('open-settings', { view: 'extensions' })
@@ -572,10 +679,10 @@ export function setup(ctx: SpindleFrontendContext) {
     if (viewMode === 'raw') {
       text = JSON.stringify(currentSnapshot.messages, null, 2)
     } else if (viewMode === 'rendered') {
-      text = currentSnapshot.messages.map((m) => m.content).filter(Boolean).join('\n\n')
+      text = currentSnapshot.messages.map((m) => msgText(m.content)).filter(Boolean).join('\n\n')
     } else {
       text = currentSnapshot.messages
-        .map((m, i) => `--- [${i}] ${m.role}${m.name ? ` (${m.name})` : ''} ---\n${m.content}`)
+        .map((m, i) => `--- [${i}] ${m.role}${m.name ? ` (${m.name})` : ''} ---\n${msgText(m.content)}`)
         .join('\n\n')
     }
     copyToClipboard(text)
@@ -590,7 +697,7 @@ export function setup(ctx: SpindleFrontendContext) {
       variant: 'danger',
       confirmLabel: 'Clear',
     })
-    if (confirmed) ctx.sendToBackend({ type: 'clear_history' })
+    if (confirmed) ctx.sendToBackend(backendPayload({ type: 'clear_history' }))
   })
 
   rawBtn.addEventListener('click', () => {
@@ -623,19 +730,20 @@ export function setup(ctx: SpindleFrontendContext) {
   const unsubBackend = ctx.onBackendMessage((payload: any) => {
     switch (payload.type) {
       case 'prompt_captured': {
-        const snapChatId = (payload.snapshot?.context as any)?.chatId
+        const snap = payload.snapshot as PromptSnapshot
+        const snapChatId = (snap?.context as any)?.chatId
         if (snapChatId && currentChatId && snapChatId !== currentChatId) break
         if (!currentChatId && snapChatId) currentChatId = snapChatId
-        history.unshift(payload.snapshot)
+        history.unshift(snap)
         if (history.length > settings.maxHistoryPerChat) history.pop()
         populateSelect()
-        const isDry = payload.snapshot.isDryRun
+        const isDry = snap.isDryRun
         const isVisible = !showDryRuns
           ? !isDry
           : settings.dryRunMode === 'alongside' || isDry
         if (isVisible) {
-          select.value = payload.snapshot.id
-          renderSnapshot(payload.snapshot)
+          select.value = snap.id
+          renderSnapshot(snap)
         }
         updateBadge()
         break
@@ -706,6 +814,10 @@ export function setup(ctx: SpindleFrontendContext) {
           showDryRuns = settings.showDryRunsByDefault
           updateButtonStates()
           settingsUI.update(settings)
+          populateSelect()
+          renderSnapshot(currentSnapshot)
+          updateBadge()
+          ctx.sendToBackend(backendPayload({ type: 'get_history' }))
         }
         break
       }
@@ -714,7 +826,7 @@ export function setup(ctx: SpindleFrontendContext) {
   cleanups.push(unsubBackend)
 
   // ---- Initial fetch ----
-  ctx.sendToBackend({ type: 'get_history' })
+  ctx.sendToBackend(backendPayload({ type: 'get_history' }))
 
   // ---- Cleanup ----
   return () => {

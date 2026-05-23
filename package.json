@@ -1,6 +1,6 @@
 {
   "name": "prompt-viewer",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Post-send prompt viewer for Lumiverse",
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "lumiverse-spindle-types": "^0.4.56",
+    "lumiverse-spindle-types": "^0.5.7",
     "typescript": "5.4"
   }
 }

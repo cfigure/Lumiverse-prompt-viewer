@@ -36,6 +36,9 @@ export const PANEL_CSS = /* css */ `
     font-size: 11px;
     color: var(--lumiverse-text-dim);
   }
+  .pv-capture-select-slot {
+    min-width: 170px;
+  }
 
   /* ---- History dropdown ---- */
   .pv-history-select {
@@ -217,18 +220,47 @@ export const PANEL_CSS = /* css */ `
     padding: 8px 16px 16px;
   }
   .pv-settings-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
-    padding: 8px 0;
+    column-gap: 20px;
+    min-height: 44px;
+    padding: 10px 0;
     border-bottom: 1px solid var(--lumiverse-border);
   }
   .pv-settings-row:last-of-type {
     border-bottom: none;
   }
+  .pv-settings-label-block {
+    min-width: 0;
+    padding-right: 12px;
+  }
   .pv-settings-label {
+    display: block;
     font-size: 13px;
     color: var(--lumiverse-text);
+  }
+  .pv-settings-control {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    min-width: 160px;
+    max-width: 240px;
+  }
+  .pv-shared-slot {
+    display: flex;
+    justify-content: flex-end;
+    min-width: 160px;
+  }
+  .pv-settings-hint,
+  .pv-settings-status {
+    font-size: 11px;
+    color: var(--lumiverse-text-dim);
+    margin-top: 4px;
+  }
+  .pv-settings-status {
+    padding-top: 8px;
+    min-height: 14px;
   }
   .pv-settings-input {
     background: var(--lumiverse-fill);
@@ -244,21 +276,5 @@ export const PANEL_CSS = /* css */ `
     color: var(--lumiverse-text-dim);
     padding: 10px 0 6px;
     font-style: italic;
-  }
-  .pv-settings-save {
-    display: block;
-    width: 100%;
-    margin-top: 8px;
-    padding: 8px;
-    background: var(--lumiverse-accent);
-    color: var(--lumiverse-accent-fg);
-    border: none;
-    border-radius: var(--lumiverse-radius);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .pv-settings-save:hover {
-    opacity: 0.9;
   }
 `

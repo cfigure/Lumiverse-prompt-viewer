@@ -1,19 +1,29 @@
 // =============================================================================
-// Per-chat ring buffer for prompt snapshots
+// Prompt snapshot store
 // =============================================================================
+
+export type LlmMessagePartDTO =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data?: string; mime_type?: string }
+  | { type: 'audio'; data?: string; mime_type?: string }
+  | { type: 'tool_use'; id?: string; name?: string; input?: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id?: string; content?: string; is_error?: boolean }
 
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string | LlmMessagePartDTO[]
   name?: string
 }
 
+export type TokenCountSource = 'native' | 'native_approximate' | 'fallback'
+
 export interface InterceptorMeta {
-  chatId: string
-  connectionId: string
-  personaId: string
-  generationType: string
-  activatedWorldInfo: unknown[]
+  chatId?: string
+  connectionId?: string
+  personaId?: string
+  generationType?: string
+  activatedWorldInfo?: unknown[]
+  [key: string]: unknown
 }
 
 export interface PromptSnapshot {
@@ -42,24 +52,33 @@ export interface PromptSnapshot {
   swipeIndex?: number
   /** True if the generation was aborted/stopped but partial content was saved */
   wasAborted?: boolean
-  /** True if token count is a chars/4 estimate rather than proper tokenizer count */
+  /** True if token count is approximate rather than a model tokenizer count. */
   approximateTokens?: boolean
+  /** Where the token count came from. */
+  tokenCountSource?: TokenCountSource
+  /** Model resolved/used for token counting, if available. */
+  tokenModel?: string
+  /** Resolution source reported by Lumiverse token counting. */
+  tokenModelSource?: 'main' | 'sidecar' | 'explicit'
   /** Name of the tokenizer used for the count, if available */
   tokenizer?: string
+  /** Native-tokenizer error that caused Prompt Viewer to use fallback, if any. */
+  tokenizerError?: string
 }
 
 export class PromptStore {
   private chats = new Map<string, PromptSnapshot[]>()
+  private all: PromptSnapshot[] = []
   private maxPerChat = 50
+  private maxGlobal = 500
 
   setMaxPerChat(max: number): void {
     this.maxPerChat = Math.max(1, Math.min(500, max))
-    // Trim existing chats if needed
+    this.maxGlobal = Math.max(100, this.maxPerChat * 10)
     for (const [chatId, arr] of this.chats.entries()) {
-      if (arr.length > this.maxPerChat) {
-        this.chats.set(chatId, arr.slice(arr.length - this.maxPerChat))
-      }
+      if (arr.length > this.maxPerChat) this.chats.set(chatId, arr.slice(arr.length - this.maxPerChat))
     }
+    if (this.all.length > this.maxGlobal) this.all = this.all.slice(this.all.length - this.maxGlobal)
   }
 
   private getChat(chatId: string): PromptSnapshot[] {
@@ -72,44 +91,60 @@ export class PromptStore {
   }
 
   push(snap: PromptSnapshot): void {
-    const arr = this.getChat(snap.context.chatId)
-    arr.push(snap)
-    if (arr.length > this.maxPerChat) arr.shift()
+    this.all.push(snap)
+    if (this.all.length > this.maxGlobal) this.all.shift()
+
+    const chatId = snap.context.chatId
+    if (chatId) {
+      const arr = this.getChat(chatId)
+      arr.push(snap)
+      if (arr.length > this.maxPerChat) arr.shift()
+    }
   }
 
-  getLatest(chatId: string): PromptSnapshot | null {
-    return this.getChat(chatId).at(-1) ?? null
+  getLatest(chatId?: string): PromptSnapshot | null {
+    return this.getAll(chatId)[0] ?? null
   }
 
-  getAll(chatId: string): PromptSnapshot[] {
-    return [...this.getChat(chatId)].reverse()
+  getAll(chatId?: string): PromptSnapshot[] {
+    const arr = chatId ? this.getChat(chatId) : this.all
+    return [...arr].reverse()
   }
 
   getById(id: string): PromptSnapshot | null {
-    for (const arr of this.chats.values()) {
-      const found = arr.find((s) => s.id === id)
-      if (found) return found
-    }
-    return null
+    return this.all.find((s) => s.id === id) ?? null
   }
 
-  linkMessage(chatId: string, messageId: string, messageNumber?: number, generationId?: string): void {
+  private replaceSnapshot(updated: PromptSnapshot): void {
+    const ai = this.all.findIndex((s) => s.id === updated.id)
+    if (ai !== -1) this.all[ai] = updated
+    const chatId = updated.context.chatId
+    if (chatId) {
+      const arr = this.getChat(chatId)
+      const ci = arr.findIndex((s) => s.id === updated.id)
+      if (ci !== -1) arr[ci] = updated
+    }
+  }
+
+  linkMessage(chatId: string, messageId: string, messageNumber?: number, generationId?: string, swipeIndex?: number): void {
     const arr = this.getChat(chatId)
-    // Prefer linking by generationId for reliability
     if (generationId) {
       for (let i = arr.length - 1; i >= 0; i--) {
         if (arr[i].generationId === generationId) {
           arr[i].messageId = messageId
           if (messageNumber !== undefined) arr[i].messageNumber = messageNumber
+          if (swipeIndex !== undefined && arr[i].isSwipe) arr[i].swipeIndex = swipeIndex
+          this.replaceSnapshot(arr[i])
           return
         }
       }
     }
-    // Fallback: find the most recent unlinked snapshot
     for (let i = arr.length - 1; i >= 0; i--) {
       if (!arr[i].messageId) {
         arr[i].messageId = messageId
         if (messageNumber !== undefined) arr[i].messageNumber = messageNumber
+        if (swipeIndex !== undefined && arr[i].isSwipe) arr[i].swipeIndex = swipeIndex
+        this.replaceSnapshot(arr[i])
         return
       }
     }
@@ -117,42 +152,46 @@ export class PromptStore {
 
   deleteByMessageId(messageId: string): number {
     let removed = 0
+    const beforeAll = this.all.length
+    this.all = this.all.filter((s) => s.messageId !== messageId)
+    removed += beforeAll - this.all.length
     for (const [chatId, arr] of this.chats.entries()) {
       const before = arr.length
       const filtered = arr.filter((s) => s.messageId !== messageId)
-      if (filtered.length < before) {
-        removed += before - filtered.length
-        this.chats.set(chatId, filtered)
-      }
+      if (filtered.length < before) this.chats.set(chatId, filtered)
     }
     return removed
   }
 
-  clearChat(chatId: string): void {
-    this.chats.delete(chatId)
+  clearChat(chatId?: string): void {
+    if (!chatId) {
+      this.all = []
+      this.chats.clear()
+      return
+    }
+    this.all = this.all.filter((s) => s.context.chatId !== chatId)
+    this.chats.set(chatId, [])
   }
 
   /** Tag a snapshot as a swipe by messageId, falling back to most recent regen */
   tagAsSwipe(chatId: string, messageId?: string, swipeIndex?: number): PromptSnapshot | null {
     const arr = this.getChat(chatId)
-
-    // Prefer matching by messageId — reliable when GENERATION_ENDED has already linked
     if (messageId) {
       for (let i = arr.length - 1; i >= 0; i--) {
         if (arr[i].messageId === messageId) {
           arr[i].isSwipe = true
           if (swipeIndex !== undefined) arr[i].swipeIndex = swipeIndex
+          this.replaceSnapshot(arr[i])
           return arr[i]
         }
       }
     }
-
-    // Fallback: tag the most recent untagged regen snapshot
     for (let i = arr.length - 1; i >= 0; i--) {
       const snap = arr[i]
       if (!snap.isSwipe && (snap.context.generationType === 'regenerate' || snap.context.generationType === 'swipe')) {
         snap.isSwipe = true
         if (swipeIndex !== undefined) snap.swipeIndex = swipeIndex
+        this.replaceSnapshot(snap)
         return snap
       }
     }
@@ -161,12 +200,11 @@ export class PromptStore {
 
   /** Mark a snapshot as aborted by generationId */
   markAborted(generationId: string): PromptSnapshot | null {
-    for (const arr of this.chats.values()) {
-      for (let i = arr.length - 1; i >= 0; i--) {
-        if (arr[i].generationId === generationId) {
-          arr[i].wasAborted = true
-          return arr[i]
-        }
+    for (const snap of [...this.all].reverse()) {
+      if (snap.generationId === generationId) {
+        snap.wasAborted = true
+        this.replaceSnapshot(snap)
+        return snap
       }
     }
     return null
