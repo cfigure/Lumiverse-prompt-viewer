@@ -7,7 +7,5 @@
   "homepage": "https://github.com/cfigure/Lumiverse-prompt-viewer",
   "description": "Inspect the fully assembled prompt after it has been sent to the LLM.",
   "permissions": ["chats", "chat_mutation", "generation", "interceptor"],
-  "entry_backend": "dist/backend.js",
-  "entry_frontend": "dist/frontend.js",
   "minimum_lumiverse_version": "1.0.0"
 }
