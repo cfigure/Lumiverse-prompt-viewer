@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { PromptStore } from './storage/prompt-store'
-import type { PromptSnapshot, LlmMessage, InterceptorMeta } from './storage/prompt-store'
+import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource } from './storage/prompt-store'
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
@@ -55,10 +55,51 @@ async function saveSettings(settings: Settings): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Content helper — LlmMessageDTO.content is always a string
+// Content helpers — LlmMessageDTO.content may be a string or typed parts.
+// Keep prompt capture lossless, but use a readable text projection for search,
+// OOC detection, display token estimates, and clipboard paths.
 // ---------------------------------------------------------------------------
-function messageText(content: string): string {
-  return typeof content === 'string' ? content : ''
+type LlmMessagePartDTO =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data?: string; mime_type?: string }
+  | { type: 'audio'; data?: string; mime_type?: string }
+  | { type: 'tool_use'; id?: string; name?: string; input?: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id?: string; content?: string; is_error?: boolean }
+
+type LlmMessageContent = string | LlmMessagePartDTO[]
+
+function messageText(content: LlmMessageContent): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+
+  return content.map((part) => {
+    if (!part || typeof part !== 'object') return ''
+    switch (part.type) {
+      case 'text':
+        return part.text ?? ''
+      case 'image':
+        return `[image${part.mime_type ? `: ${part.mime_type}` : ''}]`
+      case 'audio':
+        return `[audio${part.mime_type ? `: ${part.mime_type}` : ''}]`
+      case 'tool_use':
+        return `[tool_use${part.name ? `: ${part.name}` : ''}] ${JSON.stringify(part.input ?? {})}`
+      case 'tool_result':
+        return `[tool_result${part.is_error ? ' error' : ''}] ${part.content ?? ''}`
+      default:
+        return JSON.stringify(part)
+    }
+  }).filter(Boolean).join('\n')
+}
+
+function messageTextCandidates(content: LlmMessageContent): string[] {
+  if (typeof content === 'string') return [content]
+  if (!Array.isArray(content)) return []
+  const candidates = [messageText(content)]
+  for (const part of content) {
+    if (part?.type === 'text' && typeof part.text === 'string') candidates.push(part.text)
+    if (part?.type === 'tool_result' && typeof part.content === 'string') candidates.push(part.content)
+  }
+  return candidates
 }
 
 // ---------------------------------------------------------------------------
@@ -117,12 +158,14 @@ function detectRegenFeedback(messages: LlmMessage[]): RegenFeedbackDetection | n
   // before the interceptor runs.
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
-    const content = messageText(msg.content)
-    if (!content) continue
+    const candidates = messageTextCandidates(msg.content)
+    if (candidates.length === 0) continue
 
     if (msg.role === 'system') {
-      const m = SYSTEM_OOC_RE.exec(content)
-      if (m) return { text: m[2].trim(), raw: m[1], position: 'system' }
+      for (const content of candidates) {
+        const m = SYSTEM_OOC_RE.exec(content)
+        if (m) return { text: m[2].trim(), raw: m[1], position: 'system' }
+      }
       // A system message that ISN'T a pure OOC marker is fine — keep walking.
       // The assembler can leave other system messages at the tail (e.g.
       // depth-injected blocks), so non-match here is not a stop condition.
@@ -130,8 +173,10 @@ function detectRegenFeedback(messages: LlmMessage[]): RegenFeedbackDetection | n
     }
 
     if (msg.role === 'user') {
-      const m = TRAILING_USER_OOC_RE.exec(content)
-      if (m) return { text: m[2].trim(), raw: m[1], position: 'user' }
+      for (const content of candidates) {
+        const m = TRAILING_USER_OOC_RE.exec(content) || SYSTEM_OOC_RE.exec(content)
+        if (m) return { text: m[2].trim(), raw: m[1], position: 'user' }
+      }
       // Tail user message without the marker: feedback wasn't injected
       // in 'user' position. Stop — looking further back would risk picking
       // up older OOC text from earlier turns.
@@ -160,27 +205,43 @@ async function countTokens(
   messages: LlmMessage[],
   model?: string,
   userId?: string,
-): Promise<{ tokens: number; approximate: boolean; tokenizer?: string }> {
+): Promise<{
+  tokens: number
+  approximate: boolean
+  source: TokenCountSource
+  tokenizer?: string
+  tokenModel?: string
+  tokenModelSource?: 'main' | 'sidecar' | 'explicit'
+  error?: string
+}> {
   try {
-    const opts: { model?: string; userId?: string } = {}
+    const opts: { model?: string; modelSource?: 'main'; userId?: string } = {}
     if (model) opts.model = model
+    else opts.modelSource = 'main'
     if (userId) opts.userId = userId
-    // lumiverse-spindle-types doesn't expose the tokens interface yet,
-    // but the runtime provides it — cast through to access it.
-    const api = spindle as any
-    const result = await api.tokens.countMessages(
-      messages.map((m) => ({ role: m.role, content: m.content })),
+
+    // Native countMessages currently requires string content. Keep the captured
+    // messages lossless, but send Lumiverse a text projection for counting.
+    const result = await spindle.tokens.countMessages(
+      messages.map((m) => ({ role: m.role, content: messageText(m.content) })),
       opts,
     )
     return {
       tokens: result.total_tokens,
       approximate: result.approximate,
+      source: result.approximate ? 'native_approximate' : 'native',
       tokenizer: result.tokenizer_name,
+      tokenModel: result.model,
+      tokenModelSource: result.modelSource,
     }
-  } catch {
+  } catch (err: any) {
+    const error = err?.message ?? String(err)
+    spindle.log.warn(`Prompt Viewer native token count failed; using chars/4 fallback: ${error}`)
     return {
       tokens: estimateTokensFallback(messages),
       approximate: true,
+      source: 'fallback',
+      error,
     }
   }
 }
@@ -188,8 +249,35 @@ async function countTokens(
 // ---------------------------------------------------------------------------
 // Dry-run detection — track active generation IDs
 // ---------------------------------------------------------------------------
-const activeGenerations = new Set<string>()
-const generationMeta = new Map<string, { model: string }>()
+interface ActiveGenerationMeta {
+  chatId?: string
+  model?: string
+  generationType?: string
+  targetMessageId?: string
+}
+
+const activeGenerations = new Map<string, ActiveGenerationMeta>()
+const pendingSwipeAdds = new Map<string, { swipeIndex?: number; timestamp: number }>()
+
+function swipeKey(chatId?: string, messageId?: string): string | null {
+  return chatId && messageId ? `${chatId}:${messageId}` : null
+}
+
+function getActiveGenerationForChat(chatId?: string): { generationId: string; meta: ActiveGenerationMeta } | null {
+  let fallback: { generationId: string; meta: ActiveGenerationMeta } | null = null
+  for (const [generationId, meta] of activeGenerations) {
+    const entry = { generationId, meta }
+    fallback = entry
+    if (chatId && meta.chatId === chatId) return entry
+  }
+  return activeGenerations.size === 1 ? fallback : null
+}
+
+function prunePendingSwipes(now = Date.now()): void {
+  for (const [key, value] of pendingSwipeAdds) {
+    if (now - value.timestamp > 5 * 60 * 1000) pendingSwipeAdds.delete(key)
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Permission-gated feature registration
@@ -211,37 +299,50 @@ function tryRegisterInterceptor(): void {
     try {
       const ctx = context as InterceptorMeta
 
+      const capturedMessages = structuredClone(messages) as LlmMessage[]
       const snapshot: PromptSnapshot = {
         id: crypto.randomUUID(),
         timestamp: Date.now(),
-        messages: structuredClone(messages) as LlmMessage[],
+        messages: capturedMessages,
         context: structuredClone(ctx),
-        estimatedTokens: estimateTokensFallback(messages as LlmMessage[]),
-        isDryRun: activeGenerations.size === 0,
+        estimatedTokens: estimateTokensFallback(capturedMessages),
+        tokenCountSource: 'fallback',
+        approximateTokens: true,
       }
 
-      // Pull model and generationId from GENERATION_STARTED
-      if (activeGenerations.size > 0) {
-        const latestGenId = [...activeGenerations].at(-1)
-        if (latestGenId) {
-          snapshot.generationId = latestGenId
-          const meta = generationMeta.get(latestGenId)
-          if (meta) snapshot.model = meta.model
+      // Pull model/generation metadata from GENERATION_STARTED. Match by chatId
+      // so simultaneous generations in another chat do not incorrectly mark
+      // this prompt as live, attach the wrong model, or suppress dry-run labels.
+      const active = getActiveGenerationForChat(ctx.chatId)
+      snapshot.isDryRun = !active
+      if (active) {
+        snapshot.generationId = active.generationId
+        if (active.meta.model) snapshot.model = active.meta.model
+
+        const key = swipeKey(ctx.chatId, active.meta.targetMessageId)
+        const pendingSwipe = key ? pendingSwipeAdds.get(key) : null
+        if (pendingSwipe || active.meta.generationType === 'swipe') {
+          snapshot.isSwipe = true
+          if (pendingSwipe?.swipeIndex !== undefined) snapshot.swipeIndex = pendingSwipe.swipeIndex
         }
       }
 
       // Async token count — fire and forget, update snapshot when ready
-      countTokens(messages as LlmMessage[], snapshot.model, currentUserId).then((result) => {
+      countTokens(capturedMessages, snapshot.model, currentUserId).then((result) => {
         snapshot.estimatedTokens = result.tokens
         snapshot.approximateTokens = result.approximate
+        snapshot.tokenCountSource = result.source
         if (result.tokenizer) snapshot.tokenizer = result.tokenizer
+        if (result.tokenModel) snapshot.tokenModel = result.tokenModel
+        if (result.tokenModelSource) snapshot.tokenModelSource = result.tokenModelSource
+        if (result.error) snapshot.tokenizerError = result.error
         spindle.sendToFrontend({ type: 'snapshot_updated', snapshot })
       })
 
       // OOC marker detection. Runs unconditionally (no generationType gate)
       // so composer-regen, swipe, and the explicit regenerate path all
       // surface the banner. See detectRegenFeedback() for caveats.
-      const detected = detectRegenFeedback(messages as LlmMessage[])
+      const detected = detectRegenFeedback(capturedMessages)
       if (detected) {
         snapshot.regenFeedback = detected.text
         snapshot.regenFeedbackRaw = detected.raw
@@ -249,7 +350,7 @@ function tryRegisterInterceptor(): void {
       }
 
       store.push(snapshot)
-      activeChatId = ctx.chatId
+      activeChatId = ctx.chatId ?? activeChatId
 
       spindle.sendToFrontend({
         type: 'prompt_captured',
@@ -272,10 +373,12 @@ function tryRegisterGenerationEvents(): void {
 
   spindle.on('GENERATION_STARTED', (payload: any) => {
     if (payload.generationId) {
-      activeGenerations.add(payload.generationId)
-      if (payload.model) {
-        generationMeta.set(payload.generationId, { model: payload.model })
-      }
+      activeGenerations.set(payload.generationId, {
+        chatId: payload.chatId,
+        model: payload.model,
+        generationType: payload.generationType,
+        targetMessageId: payload.targetMessageId,
+      })
     }
   })
 
@@ -283,7 +386,6 @@ function tryRegisterGenerationEvents(): void {
     const genId = payload.generationId
     if (genId) {
       activeGenerations.delete(genId)
-      generationMeta.delete(genId)
     }
     if (!payload.chatId || !payload.messageId) return
 
@@ -291,7 +393,11 @@ function tryRegisterGenerationEvents(): void {
       const messages = await spindle.chat.getMessages(payload.chatId)
       const index = messages.findIndex((m: any) => m.id === payload.messageId)
       const msgNum = index !== -1 ? index : undefined
-      store.linkMessage(payload.chatId, payload.messageId, msgNum, genId)
+      const msg = index !== -1 ? messages[index] as any : null
+      const swipeIndex = typeof msg?.swipe_id === 'number' ? msg.swipe_id : undefined
+      store.linkMessage(payload.chatId, payload.messageId, msgNum, genId, swipeIndex)
+      const key = swipeKey(payload.chatId, payload.messageId)
+      if (key) pendingSwipeAdds.delete(key)
 
       const updated = store.getAll(payload.chatId).find((s) => s.messageId === payload.messageId)
       if (updated) {
@@ -306,7 +412,6 @@ function tryRegisterGenerationEvents(): void {
     const genId = payload.generationId
     if (genId) {
       activeGenerations.delete(genId)
-      generationMeta.delete(genId)
 
       const snap = store.markAborted(genId)
       if (snap) {
@@ -353,7 +458,11 @@ spindle.on('MESSAGE_SWIPED', (payload: any) => {
   const chatId = payload.chatId
   if (!chatId) return
 
+  prunePendingSwipes()
   const messageId = payload.message?.id
+  const key = swipeKey(chatId, messageId)
+  if (key) pendingSwipeAdds.set(key, { swipeIndex: payload.swipeId, timestamp: Date.now() })
+
   const snap = store.tagAsSwipe(chatId, messageId, payload.swipeId)
   if (snap) {
     spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: snap })
@@ -401,19 +510,18 @@ spindle.on('MESSAGE_DELETED', async (payload: any) => {
 spindle.onFrontendMessage(async (payload: any, userId: string) => {
   currentUserId = userId
   const chatId = payload.chatId || activeChatId
-
   switch (payload.type) {
     case 'get_latest':
       spindle.sendToFrontend({
         type: 'prompt_data',
-        snapshot: chatId ? store.getLatest(chatId) : null,
+        snapshot: store.getLatest(chatId),
       })
       break
 
     case 'get_history':
       spindle.sendToFrontend({
         type: 'prompt_history',
-        snapshots: chatId ? store.getAll(chatId) : [],
+        snapshots: store.getAll(chatId),
       })
       break
 
@@ -425,7 +533,7 @@ spindle.onFrontendMessage(async (payload: any, userId: string) => {
       break
 
     case 'clear_history':
-      if (chatId) store.clearChat(chatId)
+      store.clearChat(chatId)
       spindle.sendToFrontend({ type: 'history_cleared' })
       break
 
@@ -438,7 +546,6 @@ spindle.onFrontendMessage(async (payload: any, userId: string) => {
     case 'save_settings':
       try {
         await saveSettings(payload.settings)
-        spindle.toast.success('Settings saved.')
       } catch (err: any) {
         spindle.toast.error(`Failed to save settings: ${err?.message ?? err}`)
       }
