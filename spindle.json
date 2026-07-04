@@ -5,7 +5,7 @@
   "author": "cfigure",
   "github": "https://github.com/cfigure/Lumiverse-prompt-viewer",
   "homepage": "https://github.com/cfigure/Lumiverse-prompt-viewer",
-  "description": "Inspect the fully assembled prompt after it has been sent to the LLM.",
+  "description": "Inspect the fully assembled prompt from every generation and dry run.",
   "permissions": ["chats", "chat_mutation", "generation", "interceptor"],
   "minimum_lumiverse_version": "1.0.0"
 }
