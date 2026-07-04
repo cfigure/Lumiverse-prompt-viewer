@@ -1,10 +1,10 @@
 # Prompt Viewer
 
-A Spindle extension for [Lumiverse](https://github.com/prolix-oc/Lumiverse) that lets you inspect the fully assembled chat prompt after it has been sent to the LLM.
+A Spindle extension for [Lumiverse](https://github.com/prolix-oc/Lumiverse) that lets you inspect the fully assembled prompt from real generations — captured at the end of Lumiverse's interceptor pipeline, immediately before hand-off to the LLM provider.
 
 ## Features
 
-- **Post-send chat capture** — See the assembled chat messages sent to the provider, not a preview
+- **Real-generation capture** — See the assembled messages from actual generations as they leave the interceptor pipeline, not a reconstruction or preview
 - **Three view modes** — Formatted (collapsible, colour-coded), Raw (JSON), Rendered (plain text)
 - **Token counting with source labels** — Uses Lumiverse's tokenizer when available, distinguishing native counts, Lumiverse approximate counts, and Prompt Viewer chars/4 fallback
 - **OOC feedback capture** — Regen-with-feedback instructions are extracted and displayed separately
@@ -51,6 +51,8 @@ Settings autosave as soon as they are changed.
 
 ## Known Limitations
 
+- **Prompt Viewer captures the prompt at the end of the interceptor pipeline — the latest point Lumiverse's extension API exposes.** This reflects the fully assembled prompt content, including everything applied during assembly: macro resolution, world info, context clipping, and the preset's merge options (Squash System Messages, Collapse to Single User Message). 
+- **Raw output includes Lumiverse-internal bookkeeping keys.** Captured message objects carry properties Lumiverse uses internally — e.g. `_fromSystem` (Squash System Messages bookkeeping, added in Lumiverse 1.0.0) and `__chatHistorySource` / `sourceMessageId` / `sourceIndexInChat` on chat-history turns. These are in-memory tags only and are never sent to the model: providers rebuild the outgoing request from just `role` and `content`. Lumiverse's native Prompt Breakdown and Dry Run views show the same keys, as they serialize the same objects.
 - **Token counts may be approximate.** Token counts use Lumiverse’s native token counter when available. If Lumiverse does not have an exact tokenizer for the active model, it may return a rough estimate. Prompt Viewer also keeps a final fallback estimate based on character count.
 - **OOC extraction is regex-based.** The interceptor context doesn't expose regen feedback directly, so the extension pattern-matches `[OOC: ...]` from message content. User-authored OOC text that exactly matches Lumiverse's injected shape may still be detected as regen feedback.
 - **Swipe labeling is best-effort.** Prompt Viewer now tracks pending swipe-add events and applies them when the interceptor snapshot arrives, but very unusual event ordering can still leave a capture as Regen until a later update.
