@@ -60,6 +60,7 @@ interface Settings {
   maxHistoryPerChat: number
   showTokenizerSource: boolean
   hideInternalMarkers: boolean
+  renderedBreakdownStyle: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -71,6 +72,7 @@ const DEFAULT_SETTINGS: Settings = {
   maxHistoryPerChat: 50,
   showTokenizerSource: true,
   hideInternalMarkers: false,
+  renderedBreakdownStyle: false,
 }
 
 // Keys the host stamps onto interceptor messages for assembly bookkeeping.
@@ -297,7 +299,7 @@ function createSettingsUI(
 
     addRow('Default view mode', mountSelect(local.defaultViewMode, [
       { value: 'formatted', label: 'Formatted' },
-      { value: 'raw', label: 'Raw' },
+      { value: 'raw', label: 'JSON' },
       { value: 'rendered', label: 'Rendered' },
     ], (value) => commit({ defaultViewMode: value }, status)))
 
@@ -309,7 +311,8 @@ function createSettingsUI(
     addRow('Show World Info entries', mountSwitch(local.showWorldInfo, 'Show World Info entries', (checked) => commit({ showWorldInfo: checked }, status)))
     addRow('Show Regen Feedback at top', mountSwitch(local.showRegenFeedback, 'Show Regen Feedback at top', (checked) => commit({ showRegenFeedback: checked }, status)))
     addRow('Show tokenizer source', mountSwitch(local.showTokenizerSource, 'Show tokenizer source', (checked) => commit({ showTokenizerSource: checked }, status)))
-    addRow('Hide Lumiverse markers in Raw', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in Raw', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides internal assembly bookkeeping keys (_fromSystem, __isChatHistory, sourceMessageId, …) from the Raw view and Raw copy. Display-only — the capture stays lossless.')
+    addRow('Hide Lumiverse markers in JSON', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in JSON', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides internal assembly bookkeeping keys (_fromSystem, __isChatHistory, sourceMessageId, …) from the JSON view and JSON copy. Display-only — the capture stays lossless.')
+    addRow('Prompt Breakdown-style Rendered', mountSwitch(local.renderedBreakdownStyle, 'Prompt Breakdown-style Rendered', (checked) => commit({ renderedBreakdownStyle: checked }, status)), 'Adds a # provider / model heading, ### [N] ROLE separators, and a ### PARAMETERS tail to the Rendered view and its copy, matching the native Prompt Breakdown Raw output.')
     addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
     card.appendChild(status)
   }
@@ -436,7 +439,7 @@ export function setup(ctx: SpindleFrontendContext) {
   clearBtn.textContent = '✕ Clear'
 
   const rawBtn = document.createElement('button')
-  rawBtn.textContent = '{ } Raw'
+  rawBtn.textContent = '{ } JSON'
 
   const renderedBtn = document.createElement('button')
   renderedBtn.textContent = '◉ Rendered'
@@ -519,16 +522,45 @@ export function setup(ctx: SpindleFrontendContext) {
     parent.appendChild(btn)
   }
 
-  // Raw view / Raw copy text. When the hide-markers setting is on, drops
+  // JSON view / JSON copy text. Mirrors the native Prompt Breakdown's export
+  // shape: { messages, parameters?, model?, provider? } — parameters/model/
+  // provider are omitted when not yet known (e.g. a dry run before the
+  // connection lookup resolves). NOTE: 1.0.8 changed the top level from a bare
+  // message array to this object. When the hide-markers setting is on, drops
   // underscore-prefixed keys plus the named non-prefixed markers at display
   // time only — the stored snapshot stays lossless.
   function rawJson(snap: PromptSnapshot): string {
-    if (!settings.hideInternalMarkers) return JSON.stringify(snap.messages, null, 2)
+    const payload: Record<string, unknown> = { messages: snap.messages }
+    if (snap.parameters && Object.keys(snap.parameters).length > 0) payload.parameters = snap.parameters
+    if (snap.model) payload.model = snap.model
+    if (snap.provider) payload.provider = snap.provider
+    if (!settings.hideInternalMarkers) return JSON.stringify(payload, null, 2)
     return JSON.stringify(
-      snap.messages,
+      payload,
       (key, value) => (key.startsWith('_') || INTERNAL_MARKER_KEYS.has(key) ? undefined : value),
       2,
     )
+  }
+
+  // Rendered view text in Prompt Breakdown style: `# provider / model`
+  // heading, `### [N] ROLE` separators, `### PARAMETERS` tail. Shared by the
+  // Rendered copy path so clipboard always matches the screen.
+  function renderedBreakdownSegments(snap: PromptSnapshot): { kind: 'heading' | 'separator' | 'text'; text: string }[] {
+    const segments: { kind: 'heading' | 'separator' | 'text'; text: string }[] = []
+    if (snap.provider || snap.model) {
+      segments.push({ kind: 'heading', text: `# ${[snap.provider, snap.model].filter(Boolean).join(' / ')}` })
+    }
+    snap.messages.forEach((msg, i) => {
+      const text = msgText(msg.content)
+      if (!text) return
+      segments.push({ kind: 'separator', text: `### [${i + 1}] ${msg.role.toUpperCase()}` })
+      segments.push({ kind: 'text', text })
+    })
+    if (snap.parameters && Object.keys(snap.parameters).length > 0) {
+      segments.push({ kind: 'separator', text: '### PARAMETERS' })
+      segments.push({ kind: 'text', text: JSON.stringify(snap.parameters, null, 2) })
+    }
+    return segments
   }
 
   function renderFormatted(snap: PromptSnapshot): void {
@@ -626,6 +658,10 @@ export function setup(ctx: SpindleFrontendContext) {
       ? `Usage: ${snap.usage.prompt_tokens ?? '?'} prompt / ${snap.usage.completion_tokens ?? '?'} completion tokens`
       : null
 
+    const paramsJson = snap.parameters && Object.keys(snap.parameters).length > 0
+      ? JSON.stringify(snap.parameters, null, 2)
+      : null
+
     ctxBlock.textContent = [
       `Generation: ${genType}${snap.swipeIndex != null ? ` #${snap.swipeIndex}` : ''}${snap.wasAborted ? ' (aborted)' : ''}`,
       `Chat: ${meta.chatId ?? '?'}`,
@@ -637,34 +673,9 @@ export function setup(ctx: SpindleFrontendContext) {
       snap.maxContext ? `Max context: ${snap.maxContext}` : null,
       usageLine,
       worldInfoLine,
+      paramsJson ? `Parameters:\n${paramsJson}` : null,
     ].filter(Boolean).join('\n')
     messagesEl.appendChild(ctxBlock)
-
-    // Parameters — final outbound generation parameters, arriving via
-    // GENERATION_BREAKDOWN_READY shortly after a live generation completes.
-    // Mirrors the native Prompt Breakdown's collapsible Parameters section.
-    if (snap.parameters && Object.keys(snap.parameters).length > 0) {
-      const paramsJson = JSON.stringify(snap.parameters, null, 2)
-      const pWrapper = document.createElement('div')
-      pWrapper.className = 'pv-message pv-params-block'
-      const pHeader = document.createElement('div')
-      pHeader.className = 'pv-message-header'
-      const pLabel = document.createElement('span')
-      pLabel.textContent = 'Parameters'
-      const pRight = document.createElement('span')
-      pRight.className = 'pv-header-right'
-      addHeaderCopy(pRight, () => paramsJson)
-      const pToggle = document.createElement('span')
-      pToggle.className = 'pv-toggle'
-      pRight.appendChild(pToggle)
-      pHeader.append(pLabel, pRight)
-      const pBody = document.createElement('div')
-      pBody.className = 'pv-message-body pv-params-body'
-      pBody.textContent = paramsJson
-      makeCollapsible(pHeader, pBody, pToggle)
-      pWrapper.append(pHeader, pBody)
-      messagesEl.appendChild(pWrapper)
-    }
 
     // Show individual world info entries if any
     if (worldInfoArr.length > 0 && settings.showWorldInfo) {
@@ -722,18 +733,31 @@ export function setup(ctx: SpindleFrontendContext) {
   function renderRendered(snap: PromptSnapshot): void {
     const rendered = document.createElement('div')
     rendered.className = 'pv-rendered'
-    snap.messages.forEach((msg) => {
-      const text = msgText(msg.content)
-      if (!text) return
-      const block = document.createElement('div')
-      block.className = 'pv-rendered-block'
-      block.innerHTML = text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br>')
-      rendered.appendChild(block)
-    })
+
+    const escapeToHtml = (text: string) => text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br>')
+
+    if (settings.renderedBreakdownStyle) {
+      for (const seg of renderedBreakdownSegments(snap)) {
+        const block = document.createElement('div')
+        block.className = seg.kind === 'text' ? 'pv-rendered-block' : 'pv-rendered-sep'
+        if (seg.kind === 'text') block.innerHTML = escapeToHtml(seg.text)
+        else block.textContent = seg.text
+        rendered.appendChild(block)
+      }
+    } else {
+      snap.messages.forEach((msg) => {
+        const text = msgText(msg.content)
+        if (!text) return
+        const block = document.createElement('div')
+        block.className = 'pv-rendered-block'
+        block.innerHTML = escapeToHtml(text)
+        rendered.appendChild(block)
+      })
+    }
     messagesEl.appendChild(rendered)
   }
 
@@ -809,7 +833,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function updateButtonStates(): void {
     rawBtn.classList.toggle('pv-active', viewMode === 'raw')
-    rawBtn.textContent = viewMode === 'raw' ? '{ } Raw ✓' : '{ } Raw'
+    rawBtn.textContent = viewMode === 'raw' ? '{ } JSON ✓' : '{ } JSON'
     renderedBtn.classList.toggle('pv-active', viewMode === 'rendered')
     renderedBtn.textContent = viewMode === 'rendered' ? '◉ Rendered ✓' : '◉ Rendered'
     dryRunBtn.classList.toggle('pv-active', showDryRuns)
@@ -840,10 +864,12 @@ export function setup(ctx: SpindleFrontendContext) {
     if (!currentSnapshot) return
     let text: string
     if (viewMode === 'raw') {
-      // Matches the on-screen Raw view: filtered when hide-markers is on.
+      // Matches the on-screen JSON view: filtered when hide-markers is on.
       text = rawJson(currentSnapshot)
     } else if (viewMode === 'rendered') {
-      text = currentSnapshot.messages.map((m) => msgText(m.content)).filter(Boolean).join('\n\n')
+      text = settings.renderedBreakdownStyle
+        ? renderedBreakdownSegments(currentSnapshot).map((s) => s.text).join('\n\n')
+        : currentSnapshot.messages.map((m) => msgText(m.content)).filter(Boolean).join('\n\n')
     } else {
       text = currentSnapshot.messages
         .map((m, i) => `--- [${i}] ${m.role}${m.name ? ` (${m.name})` : ''} ---\n${msgText(m.content)}`)
