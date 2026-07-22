@@ -22,6 +22,8 @@ export interface InterceptorMeta {
   connectionId?: string
   personaId?: string
   generationType?: string
+  /** Authoritative host flag on staging; absent on older Lumiverse versions. */
+  dryRun?: boolean
   activatedWorldInfo?: unknown[]
   [key: string]: unknown
 }

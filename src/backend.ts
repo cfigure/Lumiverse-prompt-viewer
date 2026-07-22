@@ -366,13 +366,21 @@ function swipeKey(chatId?: string, messageId?: string): string | null {
 }
 
 function getActiveGenerationForChat(chatId?: string): { generationId: string; meta: ActiveGenerationMeta } | null {
-  let fallback: { generationId: string; meta: ActiveGenerationMeta } | null = null
-  for (const [generationId, meta] of activeGenerations) {
-    const entry = { generationId, meta }
-    fallback = entry
-    if (chatId && meta.chatId === chatId) return entry
+  // When the interceptor identifies its chat, require an exact match. Falling
+  // back to an unrelated sole active generation can misclassify a dry run in
+  // another chat as live and attach the wrong generation metadata.
+  if (chatId) {
+    for (const [generationId, meta] of activeGenerations) {
+      if (meta.chatId === chatId) return { generationId, meta }
+    }
+    return null
   }
-  return activeGenerations.size === 1 ? fallback : null
+
+  // Older hosts or unusual system prompts may omit chatId. Preserve the
+  // previous single-generation fallback only for that genuinely ambiguous case.
+  if (activeGenerations.size !== 1) return null
+  const [generationId, meta] = activeGenerations.entries().next().value as [string, ActiveGenerationMeta]
+  return { generationId, meta }
 }
 
 function prunePendingSwipes(now = Date.now()): void {
@@ -468,12 +476,18 @@ function tryRegisterInterceptor(): void {
             approximateTokens: true,
           }
 
-          // Pull model/generation metadata from GENERATION_STARTED. Match by
-          // chatId so simultaneous generations in another chat do not
-          // incorrectly mark this prompt as live, attach the wrong model, or
-          // suppress dry-run labels.
-          const active = getActiveGenerationForChat(ctxSnapshot.chatId)
-          snapshot.isDryRun = !active
+          // Staging provides an authoritative dryRun boolean in interceptor
+          // context. Trust it when present; only infer from generation events
+          // for compatibility with older hosts that do not provide the flag.
+          // A confirmed dry run must never inherit metadata from a coincident
+          // live generation, even if one exists for the same chat.
+          const contextDryRun = typeof ctxSnapshot.dryRun === 'boolean'
+            ? ctxSnapshot.dryRun
+            : undefined
+          const active = contextDryRun === true
+            ? null
+            : getActiveGenerationForChat(ctxSnapshot.chatId)
+          snapshot.isDryRun = contextDryRun ?? !active
           if (snapshot.isDryRun && typeof ctxSnapshot.chatId === 'string') {
             const switchedAt = lastChatSwitchAt.get(ctxSnapshot.chatId)
             if (switchedAt !== undefined && Date.now() - switchedAt < AUTO_DRY_RUN_WINDOW_MS) {
