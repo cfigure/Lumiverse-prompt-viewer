@@ -308,16 +308,16 @@ function createSettingsUI(
       { value: 'rendered', label: 'Rendered' },
     ], (value) => commit({ defaultViewMode: value }, status)))
 
-    addRow('Show dry runs by default', mountSwitch(local.showDryRunsByDefault, 'Show dry runs by default', (checked) => commit({ showDryRunsByDefault: checked }, status)))
-    addRow('Dry run display', mountSelect(local.dryRunMode, [
-      { value: 'only', label: 'Dry runs only' },
+    addRow('Show Dry Runs by default', mountSwitch(local.showDryRunsByDefault, 'Show Dry Runs by default', (checked) => commit({ showDryRunsByDefault: checked }, status)))
+    addRow('Dry Run display', mountSelect(local.dryRunMode, [
+      { value: 'only', label: 'Dry Runs only' },
       { value: 'alongside', label: 'Alongside normal prompts' },
     ], (value) => commit({ dryRunMode: value }, status)))
     addRow('Show World Info entries', mountSwitch(local.showWorldInfo, 'Show World Info entries', (checked) => commit({ showWorldInfo: checked }, status)))
     addRow('Show Regen Feedback at top', mountSwitch(local.showRegenFeedback, 'Show Regen Feedback at top', (checked) => commit({ showRegenFeedback: checked }, status)))
     addRow('Show tokenizer source', mountSwitch(local.showTokenizerSource, 'Show tokenizer source', (checked) => commit({ showTokenizerSource: checked }, status)))
     addRow('Hide Lumiverse markers in JSON', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in JSON', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides Lumiverse bookkeeping keys from JSON view and copy.')
-    addRow('Hide automatic chat-entry dry runs', mountSwitch(local.hideAutoDryRuns, 'Hide automatic chat-entry dry runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Hides likely chat-entry dry runs.')
+    addRow('Hide automatic chat-entry Dry Runs', mountSwitch(local.hideAutoDryRuns, 'Hide automatic chat-entry Dry Runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Hides likely chat-entry Dry Runs.')
     addRow('Format Rendered like Prompt Breakdown', mountSwitch(local.renderedBreakdownStyle, 'Format Rendered like Prompt Breakdown', (checked) => commit({ renderedBreakdownStyle: checked }, status)), 'Adds Prompt Breakdown-style headings, role labels, and parameters.')
     addRow('Expand prompt blocks to full height', mountSwitch(local.expandPromptBlocks, 'Expand prompt blocks to full height', (checked) => commit({ expandPromptBlocks: checked }, status)), 'Lets formatted sections grow beyond the default 400px cap.')
     addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
