@@ -73,7 +73,7 @@ Fields that are not yet available are omitted. The **Hide Lumiverse markers in J
 
 ### Rendered view
 
-Rendered view displays the prompt as plain text. With **Prompt Breakdown-style Rendered** enabled, it uses provider/model headings, numbered role separators, and a final parameters section similar to Lumiverse's native Prompt Breakdown raw output.
+Rendered view displays the prompt as plain text. With **Format Rendered like Prompt Breakdown** enabled, it uses provider/model headings, numbered role separators, and a final parameters section similar to Lumiverse's native Prompt Breakdown raw output.
 
 ## Settings
 
@@ -90,7 +90,7 @@ Settings are available from **Settings → Extensions → Prompt Viewer** or the
 | Show tokenizer source | On | Label native, Lumiverse-estimated, and fallback token counts |
 | Hide Lumiverse markers in JSON | Off | Hide internal assembly keys from JSON display and JSON copy only |
 | Hide automatic chat-entry dry runs | Off | Hide dry runs inferred to have been triggered automatically shortly after entering a chat |
-| Prompt Breakdown-style Rendered | Off | Format Rendered view with headings, role separators, and a parameters tail |
+| Format Rendered like Prompt Breakdown | Off | Adds Prompt Breakdown-style headings, role labels, and parameters |
 | Max prompts per chat | 50 | Retain 5–500 captures per chat; larger histories use more memory |
 
 ## Sampler parameters and generation timing
