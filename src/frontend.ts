@@ -658,8 +658,13 @@ export function setup(ctx: SpindleFrontendContext) {
       ? `Usage: ${snap.usage.prompt_tokens ?? '?'} prompt / ${snap.usage.completion_tokens ?? '?'} completion tokens`
       : null
 
-    const paramsJson = snap.parameters && Object.keys(snap.parameters).length > 0
-      ? JSON.stringify(snap.parameters, null, 2)
+    // Flat key: value lines to match the rest of the context box — the JSON
+    // view and PB-style Rendered keep the JSON form. Non-primitive values
+    // (e.g. logit_bias maps) are compact-stringified on one line.
+    const paramsLines = snap.parameters && Object.keys(snap.parameters).length > 0
+      ? 'Parameters:\n' + Object.entries(snap.parameters)
+          .map(([k, v]) => `  ${k}: ${typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}`)
+          .join('\n')
       : null
 
     ctxBlock.textContent = [
@@ -673,7 +678,7 @@ export function setup(ctx: SpindleFrontendContext) {
       snap.maxContext ? `Max context: ${snap.maxContext}` : null,
       usageLine,
       worldInfoLine,
-      paramsJson ? `Parameters:\n${paramsJson}` : null,
+      paramsLines,
     ].filter(Boolean).join('\n')
     messagesEl.appendChild(ctxBlock)
 
