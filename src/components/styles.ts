@@ -88,8 +88,9 @@ export const PANEL_CSS = /* css */ `
     white-space: pre-wrap;
     word-break: break-word;
     border-top: 1px solid var(--lumiverse-border);
-    max-height: 400px;
-    overflow-y: auto;
+    height: auto;
+    max-height: none;
+    overflow-y: visible;
   }
   .pv-message-body.pv-collapsed { display: none; }
 
