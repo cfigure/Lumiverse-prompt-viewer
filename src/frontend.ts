@@ -489,11 +489,13 @@ export function setup(ctx: SpindleFrontendContext) {
     body: HTMLElement,
     toggle: HTMLElement,
     startCollapsed = false,
+    onChange?: (collapsed: boolean) => void,
   ): { setCollapsed: (c: boolean) => void } {
     let collapsed = startCollapsed
     const apply = () => {
       body.classList.toggle('pv-collapsed', collapsed)
       toggle.textContent = collapsed ? '▶' : '▼'
+      onChange?.(collapsed)
     }
     apply()
     header.addEventListener('click', () => {
@@ -689,8 +691,12 @@ export function setup(ctx: SpindleFrontendContext) {
         const rejBody = document.createElement('div')
         rejBody.className = 'pv-message-body'
         rejBody.textContent = snap.rejectedMessage
-        // Starts collapsed — it duplicates a full prior message.
-        makeCollapsible(rejHeader, rejBody, rejToggle, true)
+        // Starts collapsed — it duplicates a full prior message. Expanding it
+        // also releases the parent OOC banner's compact height constraint so
+        // the full rejected message is visible without a nested scrollbar.
+        makeCollapsible(rejHeader, rejBody, rejToggle, true, (collapsed) => {
+          oocBanner.classList.toggle('pv-ooc-expanded', !collapsed)
+        })
         rejWrapper.append(rejHeader, rejBody)
         oocBanner.appendChild(rejWrapper)
       }

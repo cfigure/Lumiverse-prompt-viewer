@@ -137,6 +137,10 @@ export const PANEL_CSS = /* css */ `
     white-space: pre-wrap;
     word-break: break-word;
   }
+  .pv-ooc-block.pv-ooc-expanded {
+    max-height: none;
+    overflow: visible;
+  }
 
   /* ---- Header right-side group (badge + copy + toggle) ---- */
   .pv-header-right {
