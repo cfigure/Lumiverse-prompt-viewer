@@ -89,7 +89,7 @@ Settings are available from **Settings → Extensions → Prompt Viewer** or the
 | Expand prompt blocks to full height | Off | Remove the 400px height cap from prompt messages, generation metadata, World Info, and regeneration feedback |
 | Show tokenizer source | On | Label native, Lumiverse-estimated, and fallback token counts |
 | Hide Lumiverse markers in JSON | Off | Hide internal assembly keys from JSON display and JSON copy only |
-| Hide automatic chat-entry Dry runs | Off | Hide Dry runs inferred to have been triggered automatically shortly after entering a chat |
+| Hide automatic chat-entry Dry Runs | Off | Hide Dry Runs inferred to have been triggered automatically shortly after entering a chat |
 | Format Rendered like Prompt Breakdown | Off | Adds Prompt Breakdown-style headings, role labels, and parameters |
 | Max prompts per chat | 50 | Retain 5–500 captures per chat; larger histories use more memory |
 
@@ -132,7 +132,7 @@ Prompt Viewer does not modify the prompt returned to Lumiverse. It clones the se
 - **Internal JSON markers:** Lumiverse may attach bookkeeping keys such as `_fromSystem`, `__isChatHistory`, `sourceMessageId`, and `sourceIndexInChat` to in-memory message objects. Providers rebuild their request from supported message fields; these markers are not prompt text. They can be hidden with the JSON marker setting.
 - **Token counts:** Counts are exact only when Lumiverse has an appropriate tokenizer for the active model. Otherwise Lumiverse or Prompt Viewer may provide an estimate.
 - **OOC detection:** Regeneration feedback is identified by matching Lumiverse's injected `[OOC: ...]` shape because the interceptor context does not expose the feedback separately. User-authored content with the same shape may be classified as regeneration feedback.
-- **Automatic dry-run detection:** Lumiverse does not identify which extension requested a Dry Run. Prompt Viewer therefore tags likely chat-entry Rry Runs using timing, which can produce unusual false positives or false negatives.
+- **Automatic dry-run detection:** Lumiverse does not identify which extension requested a Dry Run. Prompt Viewer therefore tags likely chat-entry Dry Runs using timing, which can produce unusual false positives or false negatives.
 - **Swipe and deletion reconciliation:** Very unusual event ordering, rapid regenerations, or deletion before a snapshot is linked to a message can leave a capture labelled imperfectly or retained until history is cleared.
 
 ## Compatibility
