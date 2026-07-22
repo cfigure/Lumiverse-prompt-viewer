@@ -664,9 +664,14 @@ export function setup(ctx: SpindleFrontendContext) {
       addHeaderCopy(heading, () => snap.regenFeedbackRaw ?? `[OOC: ${snap.regenFeedback ?? ''}]`)
       const body = document.createElement('div')
       body.className = 'pv-ooc-body'
-      // Formatted view shows the extracted feedback text for readability.
-      // Copy retains the complete raw `[OOC: ...]` payload.
-      body.textContent = snap.regenFeedback || '(no feedback text)'
+      // When the rejected-message wrapper was detected, the banner shows only
+      // the user's actual feedback; the (potentially huge) rejected message
+      // lives in its own collapsible block below. Plain OOCs keep the 1.0.7
+      // raw-marker display.
+      body.textContent = snap.rejectedMessage !== undefined
+        ? (snap.regenFeedback || '(no feedback text)')
+        : (snap.regenFeedbackRaw ?? `[OOC: ${snap.regenFeedback}]`)
+      oocBanner.append(heading, body)
 
       if (snap.rejectedMessage !== undefined) {
         const rejWrapper = document.createElement('div')
