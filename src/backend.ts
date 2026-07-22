@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { PromptStore } from './storage/prompt-store'
-import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource, AutoDryRunReason } from './storage/prompt-store'
+import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource, AutoDryRunEvidence, LikelyAutoDryRunReason } from './storage/prompt-store'
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
@@ -491,10 +491,10 @@ function tryRegisterInterceptor(): void {
             : getActiveGenerationForChat(ctxSnapshot.chatId)
           snapshot.isDryRun = contextDryRun ?? !active
           if (snapshot.isDryRun && typeof ctxSnapshot.chatId === 'string') {
-            const reason = consumeAutoDryRunReason(ctxSnapshot.chatId, Date.now())
-            if (reason) {
-              snapshot.isAutoDryRun = true
-              snapshot.autoDryRunReason = reason
+            const evidence = consumeAutoDryRunEvidence(ctxSnapshot.chatId, Date.now())
+            if (evidence) {
+              snapshot.isLikelyAutoDryRun = true
+              snapshot.autoDryRunEvidence = evidence
             }
           }
           if (active) {
@@ -671,50 +671,86 @@ spindle.permissions.onChanged(({ permission, granted }) => {
 // ---------------------------------------------------------------------------
 // Chat tracking (free tier — no permission needed)
 // ---------------------------------------------------------------------------
-// Automatic Dry Run heuristics. Lumiverse does not expose which extension
-// requested a Dry Run, so Prompt Viewer can only infer likely background probes
-// from nearby host lifecycle events.
-const AUTO_DRY_RUN_WINDOW_MS = 4000
+// Automatic Dry Run heuristics. Lumiverse authoritatively identifies Dry Runs,
+// but does not expose who requested one. Prompt Viewer therefore keeps a
+// single, one-shot lifecycle evidence record per chat and labels a subsequent
+// Dry Run as *likely* automatic when it arrives within the relevant window.
+const CHAT_ENTRY_DRY_RUN_WINDOW_MS = 4000
 const REGEN_MUTATION_DRY_RUN_WINDOW_MS = 10_000
-const lastChatSwitchAt = new Map<string, number>()
-const pendingRegenMutationDryRun = new Map<string, number>()
 
-function prunePendingRegenMutationDryRuns(now = Date.now()): void {
-  for (const [chatId, timestamp] of pendingRegenMutationDryRun) {
-    if (now - timestamp >= REGEN_MUTATION_DRY_RUN_WINDOW_MS) {
-      pendingRegenMutationDryRun.delete(chatId)
+interface PendingAutoDryRunEvidence {
+  reason: LikelyAutoDryRunReason
+  timestamp: number
+  messageId?: string
+}
+
+const pendingAutoDryRunEvidence = new Map<string, PendingAutoDryRunEvidence>()
+
+function evidenceWindowMs(reason: LikelyAutoDryRunReason): number {
+  return reason === 'chat-entry'
+    ? CHAT_ENTRY_DRY_RUN_WINDOW_MS
+    : REGEN_MUTATION_DRY_RUN_WINDOW_MS
+}
+
+function prunePendingAutoDryRunEvidence(now = Date.now()): void {
+  for (const [chatId, evidence] of pendingAutoDryRunEvidence) {
+    if (now - evidence.timestamp >= evidenceWindowMs(evidence.reason)) {
+      pendingAutoDryRunEvidence.delete(chatId)
     }
   }
 }
 
-function markPendingRegenMutationDryRun(chatId: string, now = Date.now()): void {
-  prunePendingRegenMutationDryRuns(now)
-  pendingRegenMutationDryRun.set(chatId, now)
+function markPendingAutoDryRunEvidence(
+  chatId: string,
+  reason: LikelyAutoDryRunReason,
+  options: { now?: number; messageId?: string } = {},
+): void {
+  const now = options.now ?? Date.now()
+  prunePendingAutoDryRunEvidence(now)
+  pendingAutoDryRunEvidence.set(chatId, {
+    reason,
+    timestamp: now,
+    messageId: options.messageId,
+  })
 }
 
-function consumeAutoDryRunReason(chatId: string, now: number): AutoDryRunReason | undefined {
-  const mutationAt = pendingRegenMutationDryRun.get(chatId)
-  if (mutationAt !== undefined) {
-    pendingRegenMutationDryRun.delete(chatId)
-    if (now - mutationAt < REGEN_MUTATION_DRY_RUN_WINDOW_MS) {
-      return 'regen-mutation'
-    }
-  }
+function consumeAutoDryRunEvidence(chatId: string, now: number): AutoDryRunEvidence | undefined {
+  const evidence = pendingAutoDryRunEvidence.get(chatId)
+  if (!evidence) return undefined
 
-  const switchedAt = lastChatSwitchAt.get(chatId)
-  if (switchedAt !== undefined && now - switchedAt < AUTO_DRY_RUN_WINDOW_MS) {
-    return 'chat-entry'
-  }
+  // Always consume once. An expired or coincidental marker must not tag a
+  // later Dry Run merely because no earlier capture used it.
+  pendingAutoDryRunEvidence.delete(chatId)
 
-  return undefined
+  const ageMs = Math.max(0, now - evidence.timestamp)
+  if (ageMs >= evidenceWindowMs(evidence.reason)) return undefined
+
+  return {
+    reason: evidence.reason,
+    observedAt: evidence.timestamp,
+    ageMs,
+    messageId: evidence.messageId,
+  }
+}
+
+/**
+ * MESSAGE_DELETED only exposes IDs, not the deleted role or the user's action.
+ * When PV has a linked live-generation capture, require the deletion to match
+ * the latest such message. If linkage is unavailable, preserve compatibility
+ * and allow the short-lived heuristic rather than silently missing regens.
+ */
+function isLikelyRegenerationDeletion(chatId: string, messageId?: string): boolean {
+  if (!messageId) return false
+  const latestLinkedLive = store.getAll(chatId)
+    .find((snapshot) => !snapshot.isDryRun && typeof snapshot.messageId === 'string')
+  return latestLinkedLive ? latestLinkedLive.messageId === messageId : true
 }
 
 spindle.on('CHAT_SWITCHED', (payload: any) => {
   const chatId = payload.chatId ?? null
   activeChatId = chatId
   if (chatId) {
-    if (lastChatSwitchAt.size > 100) lastChatSwitchAt.clear()
-    lastChatSwitchAt.set(chatId, Date.now())
+    markPendingAutoDryRunEvidence(chatId, 'chat-entry')
   }
 
   spindle.sendToFrontend({
@@ -740,7 +776,9 @@ spindle.on('MESSAGE_SWIPED', (payload: any) => {
     ? payload.message.swipes[payload.swipeId]
     : undefined
   if (addedSwipe === '' || payload.message?.content === '') {
-    markPendingRegenMutationDryRun(chatId)
+    markPendingAutoDryRunEvidence(chatId, 'regen-mutation', {
+      messageId: typeof payload.message?.id === 'string' ? payload.message.id : undefined,
+    })
   }
 
   prunePendingSwipes()
@@ -762,11 +800,17 @@ spindle.on('MESSAGE_DELETED', async (payload: any) => {
   if (!chatId) return
 
   // Composer Regenerate deletes the prior assistant message before prompt
-  // assembly. The background extension reacts to that mutation by requesting
-  // a Dry Run, while MESSAGE_SWIPED may not fire until later (or at all on
-  // this path). Mark the deletion itself so the next Dry Run for this chat is
-  // classified as automatic. The marker is one-shot and expires quickly.
-  markPendingRegenMutationDryRun(chatId)
+  // assembly. Treat that as one-shot evidence only when it matches PV's latest
+  // linked live generation (or when linkage is unavailable and cannot be
+  // checked). Deleting an older captured message will not tag the next Dry Run.
+  const deletedMessageId = typeof payload.messageId === 'string'
+    ? payload.messageId
+    : undefined
+  if (isLikelyRegenerationDeletion(chatId, deletedMessageId)) {
+    markPendingAutoDryRunEvidence(chatId, 'regen-mutation', {
+      messageId: deletedMessageId,
+    })
+  }
 
   let removed = 0
 

@@ -17,7 +17,17 @@ export interface LlmMessage {
 
 export type TokenCountSource = 'native' | 'native_approximate' | 'fallback'
 
-export type AutoDryRunReason = 'chat-entry' | 'regen-mutation'
+export type LikelyAutoDryRunReason = 'chat-entry' | 'regen-mutation'
+
+export interface AutoDryRunEvidence {
+  reason: LikelyAutoDryRunReason
+  /** Host lifecycle event timestamp that preceded the Dry Run. */
+  observedAt: number
+  /** Delay between the lifecycle event and the captured Dry Run. */
+  ageMs: number
+  /** Related message when the host supplied one (for regeneration evidence). */
+  messageId?: string
+}
 
 export interface InterceptorMeta {
   chatId?: string
@@ -40,12 +50,12 @@ export interface PromptSnapshot {
   messageId?: string
   messageNumber?: number
   isDryRun?: boolean
-  /** Heuristic: dry run captured immediately after a chat switch or the blank
-   *  swipe mutation Lumiverse uses to stage a regeneration. The host does not
-   *  expose which extension requested a dry run, so this remains inference.
-   *  Tagged, never dropped; the frontend hides these behind a setting. */
-  isAutoDryRun?: boolean
-  autoDryRunReason?: AutoDryRunReason
+  /** Heuristic: Dry Run captured shortly after host lifecycle evidence that
+   *  commonly triggers background prompt inspection. Lumiverse does not expose
+   *  the requester, so this is deliberately labelled as likely rather than
+   *  authoritative. Tagged, never dropped; the frontend may filter it. */
+  isLikelyAutoDryRun?: boolean
+  autoDryRunEvidence?: AutoDryRunEvidence
   model?: string
   /** OOC feedback text extracted from a regen-with-feedback generation
    *  (inner text only, no `[OOC: ]` wrapping). Used for clipboard / programmatic access. */

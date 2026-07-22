@@ -30,8 +30,13 @@ interface PromptSnapshot {
   messageId?: string
   messageNumber?: number
   isDryRun?: boolean
-  isAutoDryRun?: boolean
-  autoDryRunReason?: 'chat-entry' | 'regen-mutation'
+  isLikelyAutoDryRun?: boolean
+  autoDryRunEvidence?: {
+    reason: 'chat-entry' | 'regen-mutation'
+    observedAt: number
+    ageMs: number
+    messageId?: string
+  }
   model?: string
   regenFeedback?: string
   regenFeedbackRaw?: string
@@ -318,7 +323,7 @@ function createSettingsUI(
     addRow('Show Regen Feedback at top', mountSwitch(local.showRegenFeedback, 'Show Regen Feedback at top', (checked) => commit({ showRegenFeedback: checked }, status)))
     addRow('Show tokenizer source', mountSwitch(local.showTokenizerSource, 'Show tokenizer source', (checked) => commit({ showTokenizerSource: checked }, status)))
     addRow('Hide Lumiverse markers in JSON', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in JSON', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides Lumiverse bookkeeping keys from JSON view and copy.')
-    addRow('Hide automatic Dry Runs', mountSwitch(local.hideAutoDryRuns, 'Hide automatic Dry Runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Hides likely chat-entry and regeneration-triggered Dry Runs.')
+    addRow('Hide likely automatic Dry Runs', mountSwitch(local.hideAutoDryRuns, 'Hide likely automatic Dry Runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Hides Dry Runs inferred from nearby chat-entry or regeneration lifecycle events. Captures remain stored.')
     addRow('Format Rendered like Prompt Breakdown', mountSwitch(local.renderedBreakdownStyle, 'Format Rendered like Prompt Breakdown', (checked) => commit({ renderedBreakdownStyle: checked }, status)), 'Adds Prompt Breakdown-style headings, role labels, and parameters.')
     addRow('Expand prompt blocks to full height', mountSwitch(local.expandPromptBlocks, 'Expand prompt blocks to full height', (checked) => commit({ expandPromptBlocks: checked }, status)), 'Lets formatted sections grow beyond the default 400px cap.')
     addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
@@ -354,6 +359,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let settings: Settings = { ...DEFAULT_SETTINGS }
   let viewMode: 'formatted' | 'raw' | 'rendered' = settings.defaultViewMode
   let showDryRuns = settings.showDryRunsByDefault
+  let initialSettingsApplied = false
   function backendPayload(payload: Record<string, unknown>): Record<string, unknown> {
     return currentChatId ? { ...payload, chatId: currentChatId } : payload
   }
@@ -396,11 +402,8 @@ export function setup(ctx: SpindleFrontendContext) {
   const settingsUI = createSettingsUI(ctx, settings, (newSettings) => {
     settings = newSettings
     viewMode = settings.defaultViewMode
-    showDryRuns = settings.showDryRunsByDefault
     updateButtonStates()
-    populateSelect()
-    renderSnapshot(currentSnapshot)
-    updateBadge()
+    reconcileSelection(currentSnapshot?.id)
     ctx.sendToBackend({ type: 'save_settings', settings })
     ctx.sendToBackend(backendPayload({ type: 'get_history' }))
   })
@@ -821,7 +824,14 @@ export function setup(ctx: SpindleFrontendContext) {
     else if (viewMode === 'rendered') renderRendered(snap)
     else renderFormatted(snap)
 
-    const dryLabel = snap.isAutoDryRun ? '[AUTO DRY RUN] ' : snap.isDryRun ? '[DRY RUN] ' : ''
+    const evidenceReason = snap.autoDryRunEvidence?.reason === 'chat-entry'
+      ? 'CHAT ENTRY'
+      : snap.autoDryRunEvidence?.reason === 'regen-mutation'
+        ? 'REGEN MUTATION'
+        : ''
+    const dryLabel = snap.isLikelyAutoDryRun
+      ? `[LIKELY AUTO DRY RUN${evidenceReason ? ` · ${evidenceReason}` : ''}] `
+      : snap.isDryRun ? '[DRY RUN] ' : ''
     const abortLabel = snap.wasAborted ? '[ABORTED] ' : ''
     const msgLabel = snap.messageNumber != null ? `Msg #${snap.messageNumber} · ` : ''
     const swipeLabel = snap.swipeIndex != null ? `Swipe #${snap.swipeIndex} · ` : ''
@@ -829,12 +839,20 @@ export function setup(ctx: SpindleFrontendContext) {
     const tokPrefix = snap.approximateTokens === false ? '' : '~'
     const source = settings.showTokenizerSource ? ` · ${tokenSourceLabel(snap)}` : ''
     status.textContent = `${dryLabel}${abortLabel}${msgLabel}${swipeLabel}${apiLabel}${snap.messages.length} messages · ${tokPrefix}${snap.estimatedTokens} tok${source} · ${formatTime(snap.timestamp)}`
-    if (snap.tokenizerError) status.title = `Native token count failed: ${snap.tokenizerError}`
-    else status.title = snap.tokenModel ? `Token model: ${snap.tokenModel}${snap.tokenModelSource ? ` (${snap.tokenModelSource})` : ''}` : ''
+    const statusDetails: string[] = []
+    if (snap.isLikelyAutoDryRun && snap.autoDryRunEvidence) {
+      const reason = snap.autoDryRunEvidence.reason === 'chat-entry'
+        ? 'chat entry'
+        : 'regeneration mutation'
+      statusDetails.push(`Likely automatic: captured ${snap.autoDryRunEvidence.ageMs} ms after ${reason} evidence.`)
+    }
+    if (snap.tokenizerError) statusDetails.push(`Native token count failed: ${snap.tokenizerError}`)
+    else if (snap.tokenModel) statusDetails.push(`Token model: ${snap.tokenModel}${snap.tokenModelSource ? ` (${snap.tokenModelSource})` : ''}`)
+    status.title = statusDetails.join('\n')
   }
 
   function getFilteredHistory(): PromptSnapshot[] {
-    const base = settings.hideAutoDryRuns ? history.filter((s) => !s.isAutoDryRun) : history
+    const base = settings.hideAutoDryRuns ? history.filter((s) => !s.isLikelyAutoDryRun) : history
     if (!showDryRuns) return base.filter((s) => !s.isDryRun)
     if (settings.dryRunMode === 'alongside') return base
     return base.filter((s) => s.isDryRun)
@@ -854,7 +872,7 @@ export function setup(ctx: SpindleFrontendContext) {
       const opt = document.createElement('option')
       opt.value = snap.id
       const prefix = i === 0 ? '● ' : ''
-      const dryTag = snap.isAutoDryRun ? '[DRY·auto] ' : snap.isDryRun ? '[DRY] ' : ''
+      const dryTag = snap.isLikelyAutoDryRun ? '[DRY·likely-auto] ' : snap.isDryRun ? '[DRY] ' : ''
       const oocTag = snap.regenFeedback || snap.regenFeedbackRaw ? '[OOC] ' : ''
       const abortTag = snap.wasAborted ? '[✗] ' : ''
       const rawGt = String((snap.context as any)?.generationType ?? '')
@@ -865,6 +883,22 @@ export function setup(ctx: SpindleFrontendContext) {
       opt.textContent = `${prefix}${dryTag}${abortTag}${oocTag}${locator ? locator + ' · ' : ''}${formatTime(snap.timestamp)} · ${gt} · ${snap.messages.length} msgs`
       select.appendChild(opt)
     })
+  }
+
+  function reconcileSelection(preferredId?: string): void {
+    const filtered = getFilteredHistory()
+    const preferred = preferredId
+      ? filtered.find((snapshot) => snapshot.id === preferredId)
+      : undefined
+    const current = currentSnapshot
+      ? filtered.find((snapshot) => snapshot.id === currentSnapshot?.id)
+      : undefined
+
+    currentSnapshot = preferred ?? current ?? filtered[0] ?? null
+    populateSelect()
+    if (currentSnapshot) select.value = currentSnapshot.id
+    renderSnapshot(currentSnapshot)
+    updateBadge()
   }
 
   function updateBadge(): void {
@@ -947,15 +981,7 @@ export function setup(ctx: SpindleFrontendContext) {
   dryRunBtn.addEventListener('click', () => {
     showDryRuns = !showDryRuns
     updateButtonStates()
-    populateSelect()
-    const filtered = getFilteredHistory()
-    // If current snapshot isn't in the filtered set, switch to the first one
-    if (currentSnapshot && !filtered.some((s) => s.id === currentSnapshot!.id)) {
-      currentSnapshot = filtered[0] ?? null
-      if (currentSnapshot) select.value = currentSnapshot.id
-      renderSnapshot(currentSnapshot)
-    }
-    updateBadge()
+    reconcileSelection(currentSnapshot?.id)
   })
 
   // ---- Backend messages ----
@@ -968,31 +994,18 @@ export function setup(ctx: SpindleFrontendContext) {
         if (!currentChatId && snapChatId) currentChatId = snapChatId
         history.unshift(snap)
         if (history.length > settings.maxHistoryPerChat) history.pop()
-        populateSelect()
         const isDry = snap.isDryRun
-        const hiddenAuto = snap.isAutoDryRun && settings.hideAutoDryRuns
+        const hiddenAuto = snap.isLikelyAutoDryRun && settings.hideAutoDryRuns
         const isVisible = !hiddenAuto && (!showDryRuns
           ? !isDry
           : settings.dryRunMode === 'alongside' || isDry)
-        if (isVisible) {
-          select.value = snap.id
-          renderSnapshot(snap)
-        }
-        updateBadge()
+        reconcileSelection(isVisible ? snap.id : currentSnapshot?.id)
         break
       }
 
       case 'prompt_history': {
         history = payload.snapshots ?? []
-        populateSelect()
-        const filtered = getFilteredHistory()
-        if (filtered.length > 0) {
-          select.value = filtered[0].id
-          renderSnapshot(filtered[0])
-        } else {
-          renderSnapshot(null)
-        }
-        updateBadge()
+        reconcileSelection()
         break
       }
 
@@ -1003,24 +1016,14 @@ export function setup(ctx: SpindleFrontendContext) {
 
       case 'history_cleared': {
         history = []
-        populateSelect()
-        renderSnapshot(null)
-        tab.setBadge('')
+        reconcileSelection()
         break
       }
 
       case 'chat_changed': {
         currentChatId = payload.chatId
         history = payload.snapshots ?? []
-        populateSelect()
-        const filtered = getFilteredHistory()
-        if (filtered.length > 0) {
-          select.value = filtered[0].id
-          renderSnapshot(filtered[0])
-        } else {
-          renderSnapshot(null)
-        }
-        updateBadge()
+        reconcileSelection()
         break
       }
 
@@ -1030,11 +1033,7 @@ export function setup(ctx: SpindleFrontendContext) {
           const idx = history.findIndex((s) => s.id === updated.id)
           if (idx !== -1) {
             history[idx] = updated
-            populateSelect()
-            if (currentSnapshot?.id === updated.id) {
-              select.value = updated.id
-              renderSnapshot(updated)
-            }
+            reconcileSelection(currentSnapshot?.id === updated.id ? updated.id : currentSnapshot?.id)
           }
         }
         break
@@ -1043,13 +1042,14 @@ export function setup(ctx: SpindleFrontendContext) {
       case 'settings_loaded': {
         if (payload.settings) {
           settings = { ...DEFAULT_SETTINGS, ...payload.settings }
-          viewMode = settings.defaultViewMode
-          showDryRuns = settings.showDryRunsByDefault
+          if (!initialSettingsApplied) {
+            viewMode = settings.defaultViewMode
+            showDryRuns = settings.showDryRunsByDefault
+            initialSettingsApplied = true
+          }
           updateButtonStates()
           settingsUI.update(settings)
-          populateSelect()
-          renderSnapshot(currentSnapshot)
-          updateBadge()
+          reconcileSelection(currentSnapshot?.id)
           ctx.sendToBackend(backendPayload({ type: 'get_history' }))
         }
         break
