@@ -46,6 +46,22 @@ export interface PromptSnapshot {
   regenFeedbackRaw?: string
   /** Where the OOC was injected: 'system' (own message) or 'user' (appended to last user msg) */
   regenFeedbackPosition?: 'system' | 'user'
+  /** When the regen modal's "include previous generation" option was on, the
+   *  rejected message text extracted from the `[REJECTED MESSAGE: ...]` wrapper.
+   *  When set, `regenFeedback` holds only the user's actual feedback text. */
+  rejectedMessage?: string
+  /** Final outbound generation parameters — ground truth from the host's
+   *  GENERATION_BREAKDOWN_READY event (post-merge, internals stripped). */
+  parameters?: Record<string, unknown>
+  /** Provider name. From GENERATION_BREAKDOWN_READY for live generations, or
+   *  the connection profile as a fallback (e.g. dry runs, which emit no breakdown). */
+  provider?: string
+  /** Preset used for the generation, from GENERATION_BREAKDOWN_READY. */
+  presetName?: string
+  /** Provider-reported real token usage, from GENERATION_BREAKDOWN_READY. */
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+  /** Connection max context, from GENERATION_BREAKDOWN_READY. */
+  maxContext?: number
   /** True if this generation was a swipe (distinguished from plain regen via MESSAGE_SWIPED) */
   isSwipe?: boolean
   /** The swipe index that was added, if applicable */
@@ -124,6 +140,23 @@ export class PromptStore {
       const ci = arr.findIndex((s) => s.id === updated.id)
       if (ci !== -1) arr[ci] = updated
     }
+  }
+
+  /** Merge late-arriving generation info (parameters, provider, usage, …) into
+   *  the snapshot captured for `generationId`. Skips undefined fields so a
+   *  sparse payload can never clobber already-captured values. */
+  attachGenerationInfo(generationId: string, fields: Partial<PromptSnapshot>): PromptSnapshot | null {
+    if (!generationId) return null
+    for (let i = this.all.length - 1; i >= 0; i--) {
+      const snap = this.all[i]
+      if (snap.generationId !== generationId) continue
+      for (const [key, value] of Object.entries(fields)) {
+        if (value !== undefined) (snap as unknown as Record<string, unknown>)[key] = value
+      }
+      this.replaceSnapshot(snap)
+      return snap
+    }
+    return null
   }
 
   linkMessage(chatId: string, messageId: string, messageNumber?: number, generationId?: string, swipeIndex?: number): void {

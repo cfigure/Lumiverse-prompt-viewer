@@ -43,6 +43,12 @@ interface PromptSnapshot {
   tokenModelSource?: 'main' | 'sidecar' | 'explicit'
   tokenizer?: string
   tokenizerError?: string
+  rejectedMessage?: string
+  parameters?: Record<string, unknown>
+  provider?: string
+  presetName?: string
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+  maxContext?: number
 }
 
 interface Settings {
@@ -53,6 +59,7 @@ interface Settings {
   showRegenFeedback: boolean
   maxHistoryPerChat: number
   showTokenizerSource: boolean
+  hideInternalMarkers: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -63,7 +70,13 @@ const DEFAULT_SETTINGS: Settings = {
   showRegenFeedback: true,
   maxHistoryPerChat: 50,
   showTokenizerSource: true,
+  hideInternalMarkers: false,
 }
+
+// Keys the host stamps onto interceptor messages for assembly bookkeeping.
+// Underscore-prefixed keys (_fromSystem, __isChatHistory, __isWorldInfoEntry, …)
+// are caught by prefix; these two are named because they aren't prefixed.
+const INTERNAL_MARKER_KEYS = new Set(['sourceMessageId', 'sourceIndexInChat'])
 
 const GATED_PERMISSIONS = ['interceptor', 'generation', 'chat_mutation', 'chats']
 
@@ -296,6 +309,7 @@ function createSettingsUI(
     addRow('Show World Info entries', mountSwitch(local.showWorldInfo, 'Show World Info entries', (checked) => commit({ showWorldInfo: checked }, status)))
     addRow('Show Regen Feedback at top', mountSwitch(local.showRegenFeedback, 'Show Regen Feedback at top', (checked) => commit({ showRegenFeedback: checked }, status)))
     addRow('Show tokenizer source', mountSwitch(local.showTokenizerSource, 'Show tokenizer source', (checked) => commit({ showTokenizerSource: checked }, status)))
+    addRow('Hide Lumiverse markers in Raw', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in Raw', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides internal assembly bookkeeping keys (_fromSystem, __isChatHistory, sourceMessageId, …) from the Raw view and Raw copy. Display-only — the capture stays lossless.')
     addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
     card.appendChild(status)
   }
@@ -430,6 +444,10 @@ export function setup(ctx: SpindleFrontendContext) {
   const dryRunBtn = document.createElement('button')
   dryRunBtn.textContent = '⚡ Dry Runs'
 
+  const collapseAllBtn = document.createElement('button')
+  collapseAllBtn.textContent = '▼ All'
+  collapseAllBtn.title = 'Collapse or expand all blocks'
+
   const settingsBtn = document.createElement('button')
   settingsBtn.textContent = '⚙'
   settingsBtn.title = 'Settings'
@@ -440,7 +458,7 @@ export function setup(ctx: SpindleFrontendContext) {
   const status = document.createElement('span')
   status.className = 'pv-status'
 
-  toolbar.append(select, refreshBtn, copyBtn, clearBtn, rawBtn, renderedBtn, dryRunBtn, settingsBtn, spacer, status)
+  toolbar.append(select, refreshBtn, copyBtn, clearBtn, rawBtn, renderedBtn, dryRunBtn, collapseAllBtn, settingsBtn, spacer, status)
 
   const messagesEl = document.createElement('div')
   messagesEl.className = 'pv-messages'
@@ -449,6 +467,69 @@ export function setup(ctx: SpindleFrontendContext) {
 
   // ---- Rendering ----
   let currentSnapshot: PromptSnapshot | null = null
+
+  // Collapse/expand-all registry. Rebuilt on every render; the toolbar button
+  // acts on whatever blocks the current formatted view produced.
+  let blockControls: { setCollapsed: (c: boolean) => void }[] = []
+  let allCollapsed = false
+
+  function updateCollapseAllLabel(): void {
+    collapseAllBtn.textContent = allCollapsed ? '▶ All' : '▼ All'
+  }
+
+  function makeCollapsible(
+    header: HTMLElement,
+    body: HTMLElement,
+    toggle: HTMLElement,
+    startCollapsed = false,
+  ): { setCollapsed: (c: boolean) => void } {
+    let collapsed = startCollapsed
+    const apply = () => {
+      body.classList.toggle('pv-collapsed', collapsed)
+      toggle.textContent = collapsed ? '▶' : '▼'
+    }
+    apply()
+    header.addEventListener('click', () => {
+      collapsed = !collapsed
+      apply()
+    })
+    const ctl = {
+      setCollapsed(c: boolean) {
+        collapsed = c
+        apply()
+      },
+    }
+    blockControls.push(ctl)
+    return ctl
+  }
+
+  // Per-block copy. Lives inside the clickable header, so stopPropagation
+  // keeps the 1.0.7 collapse behavior intact everywhere except the button.
+  function addHeaderCopy(parent: HTMLElement, getText: () => string): void {
+    const btn = document.createElement('button')
+    btn.className = 'pv-block-copy'
+    btn.textContent = '⎘'
+    btn.title = 'Copy this block'
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      copyToClipboard(getText())
+      btn.textContent = '✓'
+      setTimeout(() => { btn.textContent = '⎘' }, 1200)
+    })
+    parent.appendChild(btn)
+  }
+
+  // Raw view / Raw copy text. When the hide-markers setting is on, drops
+  // underscore-prefixed keys plus the named non-prefixed markers at display
+  // time only — the stored snapshot stays lossless.
+  function rawJson(snap: PromptSnapshot): string {
+    if (!settings.hideInternalMarkers) return JSON.stringify(snap.messages, null, 2)
+    return JSON.stringify(
+      snap.messages,
+      (key, value) => (key.startsWith('_') || INTERNAL_MARKER_KEYS.has(key) ? undefined : value),
+      2,
+    )
+  }
 
   function renderFormatted(snap: PromptSnapshot): void {
     const ctxBlock = document.createElement('div')
@@ -491,7 +572,7 @@ export function setup(ctx: SpindleFrontendContext) {
     // into the assembled prompt (rather than reconstructing it from inner text).
     // Position label reflects the slot the OOC marker actually occupies in the
     // assembled prompt — see detectRegenFeedback() in backend.ts.
-    if (snap.regenFeedback && settings.showRegenFeedback) {
+    if ((snap.regenFeedback || snap.rejectedMessage) && settings.showRegenFeedback) {
       const oocBanner = document.createElement('div')
       oocBanner.className = 'pv-context-block pv-ooc-block'
       const heading = document.createElement('div')
@@ -499,12 +580,51 @@ export function setup(ctx: SpindleFrontendContext) {
       heading.textContent = snap.regenFeedbackPosition
         ? `Regen Feedback (${snap.regenFeedbackPosition})`
         : 'Regen Feedback'
+      addHeaderCopy(heading, () => snap.regenFeedbackRaw ?? `[OOC: ${snap.regenFeedback ?? ''}]`)
       const body = document.createElement('div')
       body.className = 'pv-ooc-body'
-      body.textContent = snap.regenFeedbackRaw ?? `[OOC: ${snap.regenFeedback}]`
+      // When the rejected-message wrapper was detected, the banner shows only
+      // the user's actual feedback; the (potentially huge) rejected message
+      // lives in its own collapsible block below. Plain OOCs keep the 1.0.7
+      // raw-marker display.
+      body.textContent = snap.rejectedMessage !== undefined
+        ? (snap.regenFeedback || '(no feedback text)')
+        : (snap.regenFeedbackRaw ?? `[OOC: ${snap.regenFeedback}]`)
       oocBanner.append(heading, body)
+
+      if (snap.rejectedMessage !== undefined) {
+        const rejWrapper = document.createElement('div')
+        rejWrapper.className = 'pv-message pv-rejected-block'
+        const rejHeader = document.createElement('div')
+        rejHeader.className = 'pv-message-header'
+        const rejLabel = document.createElement('span')
+        rejLabel.textContent = 'Rejected message (sent for reference)'
+        const rejRight = document.createElement('span')
+        rejRight.className = 'pv-header-right'
+        const rejBadge = document.createElement('span')
+        rejBadge.className = 'pv-token-badge'
+        rejBadge.textContent = `~${Math.ceil(snap.rejectedMessage.length / 4)} tok`
+        rejRight.appendChild(rejBadge)
+        addHeaderCopy(rejRight, () => snap.rejectedMessage ?? '')
+        const rejToggle = document.createElement('span')
+        rejToggle.className = 'pv-toggle'
+        rejRight.appendChild(rejToggle)
+        rejHeader.append(rejLabel, rejRight)
+        const rejBody = document.createElement('div')
+        rejBody.className = 'pv-message-body'
+        rejBody.textContent = snap.rejectedMessage
+        // Starts collapsed — it duplicates a full prior message.
+        makeCollapsible(rejHeader, rejBody, rejToggle, true)
+        rejWrapper.append(rejHeader, rejBody)
+        oocBanner.appendChild(rejWrapper)
+      }
+
       messagesEl.appendChild(oocBanner)
     }
+
+    const usageLine = snap.usage && (snap.usage.prompt_tokens != null || snap.usage.completion_tokens != null)
+      ? `Usage: ${snap.usage.prompt_tokens ?? '?'} prompt / ${snap.usage.completion_tokens ?? '?'} completion tokens`
+      : null
 
     ctxBlock.textContent = [
       `Generation: ${genType}${snap.swipeIndex != null ? ` #${snap.swipeIndex}` : ''}${snap.wasAborted ? ' (aborted)' : ''}`,
@@ -512,9 +632,39 @@ export function setup(ctx: SpindleFrontendContext) {
       `Connection: ${meta.connectionId ?? '?'}`,
       `Persona: ${meta.personaId ?? '?'}`,
       snap.model ? `Model: ${snap.model}` : null,
+      snap.provider ? `Provider: ${snap.provider}` : null,
+      snap.presetName ? `Preset: ${snap.presetName}` : null,
+      snap.maxContext ? `Max context: ${snap.maxContext}` : null,
+      usageLine,
       worldInfoLine,
     ].filter(Boolean).join('\n')
     messagesEl.appendChild(ctxBlock)
+
+    // Parameters — final outbound generation parameters, arriving via
+    // GENERATION_BREAKDOWN_READY shortly after a live generation completes.
+    // Mirrors the native Prompt Breakdown's collapsible Parameters section.
+    if (snap.parameters && Object.keys(snap.parameters).length > 0) {
+      const paramsJson = JSON.stringify(snap.parameters, null, 2)
+      const pWrapper = document.createElement('div')
+      pWrapper.className = 'pv-message pv-params-block'
+      const pHeader = document.createElement('div')
+      pHeader.className = 'pv-message-header'
+      const pLabel = document.createElement('span')
+      pLabel.textContent = 'Parameters'
+      const pRight = document.createElement('span')
+      pRight.className = 'pv-header-right'
+      addHeaderCopy(pRight, () => paramsJson)
+      const pToggle = document.createElement('span')
+      pToggle.className = 'pv-toggle'
+      pRight.appendChild(pToggle)
+      pHeader.append(pLabel, pRight)
+      const pBody = document.createElement('div')
+      pBody.className = 'pv-message-body pv-params-body'
+      pBody.textContent = paramsJson
+      makeCollapsible(pHeader, pBody, pToggle)
+      pWrapper.append(pHeader, pBody)
+      messagesEl.appendChild(pWrapper)
+    }
 
     // Show individual world info entries if any
     if (worldInfoArr.length > 0 && settings.showWorldInfo) {
@@ -535,28 +685,28 @@ export function setup(ctx: SpindleFrontendContext) {
     }
 
     snap.messages.forEach((msg, i) => {
+      const text = msgText(msg.content)
       const wrapper = document.createElement('div')
       wrapper.className = `pv-message pv-role-${msg.role}`
       const header = document.createElement('div')
       header.className = 'pv-message-header'
       const label = document.createElement('span')
       label.textContent = `#${i} — ${msg.name ? `${msg.role} (${msg.name})` : msg.role}`
+      const right = document.createElement('span')
+      right.className = 'pv-header-right'
       const badge = document.createElement('span')
       badge.className = 'pv-token-badge'
-      badge.textContent = `~${Math.ceil(msgText(msg.content).length / 4)} tok`
+      badge.textContent = `~${Math.ceil(text.length / 4)} tok`
+      right.appendChild(badge)
+      addHeaderCopy(right, () => text)
       const toggle = document.createElement('span')
       toggle.className = 'pv-toggle'
-      toggle.textContent = '▼'
-      header.append(label, badge, toggle)
+      right.appendChild(toggle)
+      header.append(label, right)
       const body = document.createElement('div')
       body.className = 'pv-message-body'
-      body.textContent = msgText(msg.content)
-      let collapsed = false
-      header.addEventListener('click', () => {
-        collapsed = !collapsed
-        body.classList.toggle('pv-collapsed', collapsed)
-        toggle.textContent = collapsed ? '▶' : '▼'
-      })
+      body.textContent = text
+      makeCollapsible(header, body, toggle)
       wrapper.append(header, body)
       messagesEl.appendChild(wrapper)
     })
@@ -565,7 +715,7 @@ export function setup(ctx: SpindleFrontendContext) {
   function renderRaw(snap: PromptSnapshot): void {
     const rawEl = document.createElement('div')
     rawEl.className = 'pv-raw'
-    rawEl.textContent = JSON.stringify(snap.messages, null, 2)
+    rawEl.textContent = rawJson(snap)
     messagesEl.appendChild(rawEl)
   }
 
@@ -590,6 +740,11 @@ export function setup(ctx: SpindleFrontendContext) {
   function renderSnapshot(snap: PromptSnapshot | null): void {
     currentSnapshot = snap
     messagesEl.textContent = ''
+    // Fresh render → fresh block registry, expanded by default (matches the
+    // per-block toggles, which also reset when switching snapshots).
+    blockControls = []
+    allCollapsed = false
+    updateCollapseAllLabel()
     if (!snap) {
       const empty = document.createElement('div')
       empty.className = 'pv-empty'
@@ -659,7 +814,15 @@ export function setup(ctx: SpindleFrontendContext) {
     renderedBtn.textContent = viewMode === 'rendered' ? '◉ Rendered ✓' : '◉ Rendered'
     dryRunBtn.classList.toggle('pv-active', showDryRuns)
     dryRunBtn.textContent = showDryRuns ? '⚡ Dry Runs ✓' : '⚡ Dry Runs'
+    // Collapsible blocks only exist in the formatted view.
+    collapseAllBtn.disabled = viewMode !== 'formatted'
   }
+
+  collapseAllBtn.addEventListener('click', () => {
+    allCollapsed = !allCollapsed
+    for (const ctl of blockControls) ctl.setCollapsed(allCollapsed)
+    updateCollapseAllLabel()
+  })
 
   // ---- Event handlers ----
   select.addEventListener('change', () => {
@@ -677,7 +840,8 @@ export function setup(ctx: SpindleFrontendContext) {
     if (!currentSnapshot) return
     let text: string
     if (viewMode === 'raw') {
-      text = JSON.stringify(currentSnapshot.messages, null, 2)
+      // Matches the on-screen Raw view: filtered when hide-markers is on.
+      text = rawJson(currentSnapshot)
     } else if (viewMode === 'rendered') {
       text = currentSnapshot.messages.map((m) => msgText(m.content)).filter(Boolean).join('\n\n')
     } else {

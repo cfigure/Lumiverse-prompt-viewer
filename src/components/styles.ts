@@ -137,6 +137,51 @@ export const PANEL_CSS = /* css */ `
     word-break: break-word;
   }
 
+  /* ---- Header right-side group (badge + copy + toggle) ---- */
+  .pv-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .pv-block-copy {
+    background: none;
+    border: none;
+    padding: 0 2px;
+    margin: 0;
+    cursor: pointer;
+    color: inherit;
+    font-size: 12px;
+    line-height: 1;
+    opacity: 0.65;
+  }
+  .pv-block-copy:hover { opacity: 1; }
+  .pv-ooc-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* ---- Rejected message sub-block (regen-with-previous-message) ---- */
+  .pv-rejected-block {
+    margin-top: 8px;
+    border: 1px solid color-mix(in srgb, var(--lumiverse-border) 50%, hsl(35, 80%, 55%));
+  }
+  .pv-rejected-block .pv-message-header {
+    background: color-mix(in srgb, var(--lumiverse-fill) 75%, hsl(35, 55%, 40%));
+    color: hsl(35, 55%, 70%);
+  }
+
+  /* ---- Parameters block ---- */
+  .pv-params-block .pv-message-header {
+    background: color-mix(in srgb, var(--lumiverse-fill) 70%, hsl(170, 40%, 38%));
+    color: hsl(170, 40%, 68%);
+  }
+  .pv-params-body {
+    font-family: monospace;
+    font-size: 12px;
+  }
+
   /* ---- World Info entries block ---- */
   .pv-wi-block {
     border-color: color-mix(in srgb, var(--lumiverse-border) 50%, hsl(200, 60%, 50%));
