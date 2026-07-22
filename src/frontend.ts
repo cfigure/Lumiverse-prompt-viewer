@@ -866,8 +866,9 @@ export function setup(ctx: SpindleFrontendContext) {
     renderedBtn.textContent = viewMode === 'rendered' ? '◉ Rendered ✓' : '◉ Rendered'
     dryRunBtn.classList.toggle('pv-active', showDryRuns)
     dryRunBtn.textContent = showDryRuns ? '⚡ Dry Runs ✓' : '⚡ Dry Runs'
-    // Collapsible blocks only exist in the formatted view.
-    collapseAllBtn.disabled = viewMode !== 'formatted'
+    // Collapsible blocks only exist in the formatted view. Hide the control
+    // entirely in JSON and Rendered so the toolbar only exposes relevant actions.
+    collapseAllBtn.classList.toggle('pv-view-hidden', viewMode !== 'formatted')
   }
 
   collapseAllBtn.addEventListener('click', () => {

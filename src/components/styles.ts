@@ -31,6 +31,9 @@ export const PANEL_CSS = /* css */ `
     color: var(--lumiverse-accent-fg);
     border-color: var(--lumiverse-accent);
   }
+  .pv-toolbar button.pv-view-hidden {
+    display: none;
+  }
   .pv-toolbar .pv-spacer { flex: 1; }
   .pv-toolbar .pv-status {
     font-size: 11px;
