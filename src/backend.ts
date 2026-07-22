@@ -687,6 +687,11 @@ function prunePendingRegenMutationDryRuns(now = Date.now()): void {
   }
 }
 
+function markPendingRegenMutationDryRun(chatId: string, now = Date.now()): void {
+  prunePendingRegenMutationDryRuns(now)
+  pendingRegenMutationDryRun.set(chatId, now)
+}
+
 function consumeAutoDryRunReason(chatId: string, now: number): AutoDryRunReason | undefined {
   const mutationAt = pendingRegenMutationDryRun.get(chatId)
   if (mutationAt !== undefined) {
@@ -735,8 +740,7 @@ spindle.on('MESSAGE_SWIPED', (payload: any) => {
     ? payload.message.swipes[payload.swipeId]
     : undefined
   if (addedSwipe === '' || payload.message?.content === '') {
-    prunePendingRegenMutationDryRuns()
-    pendingRegenMutationDryRun.set(chatId, Date.now())
+    markPendingRegenMutationDryRun(chatId)
   }
 
   prunePendingSwipes()
@@ -756,6 +760,13 @@ spindle.on('MESSAGE_SWIPED', (payload: any) => {
 spindle.on('MESSAGE_DELETED', async (payload: any) => {
   const chatId = payload.chatId || activeChatId
   if (!chatId) return
+
+  // Composer Regenerate deletes the prior assistant message before prompt
+  // assembly. The background extension reacts to that mutation by requesting
+  // a Dry Run, while MESSAGE_SWIPED may not fire until later (or at all on
+  // this path). Mark the deletion itself so the next Dry Run for this chat is
+  // classified as automatic. The marker is one-shot and expires quickly.
+  markPendingRegenMutationDryRun(chatId)
 
   let removed = 0
 
