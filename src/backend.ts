@@ -25,6 +25,7 @@ interface Settings {
   hideInternalMarkers: boolean
   renderedBreakdownStyle: boolean
   hideAutoDryRuns: boolean
+  expandPromptBlocks: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -37,7 +38,8 @@ const DEFAULT_SETTINGS: Settings = {
   showTokenizerSource: true,
   hideInternalMarkers: false,
   renderedBreakdownStyle: false,
-  hideAutoDryRuns: true,
+  hideAutoDryRuns: false,
+  expandPromptBlocks: false,
 }
 
 async function loadSettings(): Promise<Settings> {

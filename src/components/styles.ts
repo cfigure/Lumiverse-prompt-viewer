@@ -92,10 +92,25 @@ export const PANEL_CSS = /* css */ `
     word-break: break-word;
     border-top: 1px solid var(--lumiverse-border);
     height: auto;
+    max-height: 400px;
+    overflow-y: auto;
+  }
+  .pv-message-body.pv-collapsed { display: none; }
+
+  /* Full-height mode is opt-in. The default preserves the 1.0.7-style
+     400px cap across every expandable formatted-view section. */
+  .pv-messages.pv-full-height .pv-message-body,
+  .pv-messages.pv-full-height .pv-context-block {
     max-height: none;
     overflow-y: visible;
   }
-  .pv-message-body.pv-collapsed { display: none; }
+
+  /* The rejected message is nested inside the capped OOC container. Let the
+     parent own scrolling so expansion does not create two nested scrollbars. */
+  .pv-ooc-block .pv-rejected-block .pv-message-body {
+    max-height: none;
+    overflow-y: visible;
+  }
 
   /* ---- Role colors ---- */
   /* Use Lumiverse theme variables as base, with semi-transparent hue tints */
@@ -120,7 +135,7 @@ export const PANEL_CSS = /* css */ `
     font-family: monospace;
     white-space: pre-wrap;
     color: var(--lumiverse-text-muted);
-    max-height: 180px;
+    max-height: 400px;
     overflow-y: auto;
   }
 
@@ -139,10 +154,6 @@ export const PANEL_CSS = /* css */ `
     font-family: monospace;
     white-space: pre-wrap;
     word-break: break-word;
-  }
-  .pv-ooc-block.pv-ooc-expanded {
-    max-height: none;
-    overflow: visible;
   }
 
   /* ---- Header right-side group (badge + copy + toggle) ---- */
@@ -207,7 +218,6 @@ export const PANEL_CSS = /* css */ `
     border-color: color-mix(in srgb, var(--lumiverse-border) 50%, hsl(200, 60%, 50%));
     background: color-mix(in srgb, var(--lumiverse-fill-subtle) 85%, hsl(200, 40%, 35%));
     color: hsl(200, 45%, 70%);
-    max-height: 200px;
   }
 
   /* ---- Aborted generation indicator ---- */

@@ -63,6 +63,7 @@ interface Settings {
   hideInternalMarkers: boolean
   renderedBreakdownStyle: boolean
   hideAutoDryRuns: boolean
+  expandPromptBlocks: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -75,7 +76,8 @@ const DEFAULT_SETTINGS: Settings = {
   showTokenizerSource: true,
   hideInternalMarkers: false,
   renderedBreakdownStyle: false,
-  hideAutoDryRuns: true,
+  hideAutoDryRuns: false,
+  expandPromptBlocks: false,
 }
 
 // Keys the host stamps onto interceptor messages for assembly bookkeeping.
@@ -317,6 +319,7 @@ function createSettingsUI(
     addRow('Hide Lumiverse markers in JSON', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in JSON', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides internal assembly bookkeeping keys (_fromSystem, __isChatHistory, sourceMessageId, …) from the JSON view and JSON copy. Display-only — the capture stays lossless.')
     addRow('Hide automatic chat-entry dry runs', mountSwitch(local.hideAutoDryRuns, 'Hide automatic chat-entry dry runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Some extensions trigger a dry run when you enter a chat. These are tagged by timing (captured within a few seconds of switching chats) and hidden from views and the badge — still stored, and shown with an [auto] tag when this is off.')
     addRow('Prompt Breakdown-style Rendered', mountSwitch(local.renderedBreakdownStyle, 'Prompt Breakdown-style Rendered', (checked) => commit({ renderedBreakdownStyle: checked }, status)), 'Adds a # provider / model heading, ### [N] ROLE separators, and a ### PARAMETERS tail to the Rendered view and its copy, matching the native Prompt Breakdown Raw output.')
+    addRow('Expand prompt blocks to full height', mountSwitch(local.expandPromptBlocks, 'Expand prompt blocks to full height', (checked) => commit({ expandPromptBlocks: checked }, status)), 'Off preserves the 1.0.7-style 400px cap with internal scrolling. On lets prompt messages, regeneration feedback, World Info, and the connection/parameter summary grow to fit their full content.')
     addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
     card.appendChild(status)
   }
@@ -790,6 +793,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function renderSnapshot(snap: PromptSnapshot | null): void {
     currentSnapshot = snap
+    messagesEl.classList.toggle('pv-full-height', settings.expandPromptBlocks)
     messagesEl.textContent = ''
     // Fresh render → fresh block registry, expanded by default (matches the
     // per-block toggles, which also reset when switching snapshots).
