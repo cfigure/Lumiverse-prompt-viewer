@@ -679,6 +679,8 @@ export function setup(ctx: SpindleFrontendContext) {
        || '(no feedback text)'
 
       body.textContent = readableFeedback
+      oocBanner.appendChild(heading)
+      oocBanner.appendChild(body)
 
       if (snap.rejectedMessage !== undefined) {
         const rejWrapper = document.createElement('div')
