@@ -1,6 +1,6 @@
 # Prompt Viewer
 
-Prompt Viewer is a Spindle extension for [Lumiverse](https://github.com/prolix-oc/Lumiverse) that captures and displays the assembled prompt used by real generations and dry runs.
+Prompt Viewer is a Spindle extension for [Lumiverse](https://github.com/prolix-oc/Lumiverse) that captures and displays the assembled prompt used by real generations and Dry Runs.
 
 It is intended for inspecting prompt order, resolved message content, World Info activation, regeneration feedback, token estimates, and—after a completed live generation—the final parameters published by Lumiverse's Prompt Breakdown pipeline.
 
