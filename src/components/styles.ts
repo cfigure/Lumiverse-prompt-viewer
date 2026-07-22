@@ -31,6 +31,9 @@ export const PANEL_CSS = /* css */ `
     color: var(--lumiverse-accent-fg);
     border-color: var(--lumiverse-accent);
   }
+  .pv-toolbar button.pv-view-hidden {
+    display: none;
+  }
   .pv-toolbar .pv-spacer { flex: 1; }
   .pv-toolbar .pv-status {
     font-size: 11px;
@@ -88,10 +91,31 @@ export const PANEL_CSS = /* css */ `
     white-space: pre-wrap;
     word-break: break-word;
     border-top: 1px solid var(--lumiverse-border);
+    height: auto;
     max-height: 400px;
     overflow-y: auto;
   }
   .pv-message-body.pv-collapsed { display: none; }
+
+  /* Full-height mode is opt-in. The default preserves the 1.0.7-style
+     400px cap across every expandable formatted-view section. */
+  .pv-messages.pv-full-height .pv-message-body,
+  .pv-messages.pv-full-height .pv-context-block {
+    max-height: none;
+    overflow-y: visible;
+  }
+
+  /* In compact mode the regeneration panel remains the sole 400px scroll
+     container. The expanded rejected message is always allowed to reach its
+     natural height, so there is never a scrollbar nested inside the panel. */
+  .pv-messages:not(.pv-full-height) .pv-ooc-block {
+    max-height: 400px;
+    overflow-y: auto;
+  }
+  .pv-ooc-block .pv-rejected-block .pv-message-body {
+    max-height: none;
+    overflow-y: visible;
+  }
 
   /* ---- Role colors ---- */
   /* Use Lumiverse theme variables as base, with semi-transparent hue tints */
@@ -116,7 +140,7 @@ export const PANEL_CSS = /* css */ `
     font-family: monospace;
     white-space: pre-wrap;
     color: var(--lumiverse-text-muted);
-    max-height: 180px;
+    max-height: 400px;
     overflow-y: auto;
   }
 
@@ -137,12 +161,68 @@ export const PANEL_CSS = /* css */ `
     word-break: break-word;
   }
 
+  /* ---- Header right-side group (badge + copy + toggle) ---- */
+  .pv-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .pv-block-copy {
+    appearance: none;
+    background: color-mix(in srgb, currentColor 9%, transparent);
+    border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+    border-radius: 5px;
+    padding: 3px 7px;
+    margin: 0;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.1;
+    opacity: 0.78;
+    min-width: 46px;
+    text-align: center;
+  }
+  .pv-block-copy:hover,
+  .pv-block-copy:focus-visible {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 15%, transparent);
+  }
+  .pv-ooc-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* ---- Rejected message sub-block (regen-with-previous-message) ---- */
+  .pv-rejected-block {
+    margin-top: 8px;
+    border: 1px solid color-mix(in srgb, var(--lumiverse-border) 50%, hsl(35, 80%, 55%));
+  }
+  .pv-rejected-block .pv-message-header {
+    background: color-mix(in srgb, var(--lumiverse-fill) 75%, hsl(35, 55%, 40%));
+    color: hsl(35, 55%, 70%);
+  }
+
+  /* ---- Rendered view: Prompt Breakdown-style headings/separators ---- */
+  .pv-rendered-sep {
+    font-family: monospace;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: var(--lumiverse-text-muted);
+    margin: 14px 0 6px;
+    white-space: pre-wrap;
+  }
+  .pv-rendered-sep:first-child { margin-top: 0; }
+
   /* ---- World Info entries block ---- */
   .pv-wi-block {
     border-color: color-mix(in srgb, var(--lumiverse-border) 50%, hsl(200, 60%, 50%));
     background: color-mix(in srgb, var(--lumiverse-fill-subtle) 85%, hsl(200, 40%, 35%));
     color: hsl(200, 45%, 70%);
-    max-height: 200px;
   }
 
   /* ---- Aborted generation indicator ---- */

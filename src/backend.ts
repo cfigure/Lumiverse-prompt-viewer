@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { PromptStore } from './storage/prompt-store'
-import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource } from './storage/prompt-store'
+import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource, AutoDryRunEvidence, LikelyAutoDryRunReason } from './storage/prompt-store'
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
@@ -21,6 +21,11 @@ interface Settings {
   showWorldInfo: boolean
   showRegenFeedback: boolean
   maxHistoryPerChat: number
+  showTokenizerSource: boolean
+  hideInternalMarkers: boolean
+  renderedBreakdownStyle: boolean
+  hideAutoDryRuns: boolean
+  expandPromptBlocks: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -30,6 +35,11 @@ const DEFAULT_SETTINGS: Settings = {
   showWorldInfo: true,
   showRegenFeedback: true,
   maxHistoryPerChat: 50,
+  showTokenizerSource: true,
+  hideInternalMarkers: false,
+  renderedBreakdownStyle: false,
+  hideAutoDryRuns: false,
+  expandPromptBlocks: false,
 }
 
 async function loadSettings(): Promise<Settings> {
@@ -141,21 +151,74 @@ function messageTextCandidates(content: LlmMessageContent): string[] {
 const SYSTEM_OOC_RE = /^(\[OOC:\s*([\s\S]*?)\])$/
 const TRAILING_USER_OOC_RE = /\n(\[OOC:\s*([\s\S]*?)\])$/
 
+// ---------------------------------------------------------------------------
+// Stage 2: "include previous generation" wrapper.
+//
+// When the regen modal's checkbox is on, the client composes the feedback as:
+//   `[REJECTED MESSAGE: <preamble> Previous message for reference: {{regeneratedMessage}}]\n\n<feedback>`
+// The `{{regeneratedMessage}}` macro is resolved by the host's late macro pass
+// (resolvePromptMacrosAfterRegexPass), so by interceptor time the OOC body is:
+//   `[REJECTED MESSAGE: … reference: <full rejected message>]\n\n<feedback>`
+//
+// Split rules:
+//   - Anchor on the literal `[REJECTED MESSAGE:` prefix and the literal
+//     `Previous message for reference:` marker (both compile-time constants in
+//     Lumiverse's RegenFeedbackModal).
+//   - GREEDY message capture, then backtrack to the LAST `]` + newline(s)
+//     before the trailing feedback. A rejected RP message routinely contains
+//     `]` + blank lines (bracketed OOC asides, paragraph breaks); the user's
+//     short feedback text rarely does. Greedy therefore mis-splits only when
+//     the FEEDBACK itself contains `]` followed by a newline — accepted risk.
+//   - On any parse failure, fall back to stage-1 behavior (whole body treated
+//     as feedback), i.e. worst case is exactly the pre-1.0.8 result.
+// ---------------------------------------------------------------------------
+const REJECTED_PREFIX = '[REJECTED MESSAGE:'
+const REJECTED_SPLIT_RE = /^\[REJECTED MESSAGE:[\s\S]*?Previous message for reference:\s*([\s\S]*)\]\s*\n+([\s\S]*)$/
+const REJECTED_NO_FEEDBACK_RE = /^\[REJECTED MESSAGE:[\s\S]*?Previous message for reference:\s*([\s\S]*)\]\s*$/
+
+function splitRejectedWrapper(body: string): { rejectedMessage: string; feedback: string } | null {
+  if (!body.startsWith(REJECTED_PREFIX)) return null
+  let m = REJECTED_SPLIT_RE.exec(body)
+  if (m) return { rejectedMessage: m[1].trim(), feedback: m[2].trim() }
+  m = REJECTED_NO_FEEDBACK_RE.exec(body)
+  if (m) return { rejectedMessage: m[1].trim(), feedback: '' }
+  return null
+}
+
 interface RegenFeedbackDetection {
-  /** Inner text only (body between `[OOC:` and `]`, trimmed). */
+  /** Feedback text only. For plain OOCs this is the whole inner body; for the
+   *  rejected-message wrapper it is just the user's trailing feedback. */
   text: string
   /** Raw matched marker including `[OOC: ]` wrapper, exactly as injected. */
   raw: string
   /** Which slot the marker appeared in. Detection-driven, not user-setting-driven. */
   position: 'system' | 'user'
+  /** Rejected previous message extracted from the wrapper, when present. */
+  rejectedMessage?: string
+}
+
+function buildDetection(m: RegExpExecArray, position: 'system' | 'user'): RegenFeedbackDetection {
+  const body = m[2].trim()
+  const split = splitRejectedWrapper(body)
+  if (split) {
+    return { text: split.feedback, raw: m[1], position, rejectedMessage: split.rejectedMessage }
+  }
+  return { text: body, raw: m[1], position }
 }
 
 function detectRegenFeedback(messages: LlmMessage[]): RegenFeedbackDetection | null {
   if (!messages.length) return null
 
-  // Walk backwards from the end. The assembler injects at the tail in both
-  // positions, and on regen/swipe paths nothing further mutates the tail
-  // before the interceptor runs.
+  // Staging's interceptor bridge stamps `__isChatHistory` onto real chat
+  // turns — the same identity marker the assembler's regen-feedback injector
+  // uses to pick its target message. When flags are present anywhere in the
+  // array, use them: block-based assembly appends preset user/system blocks
+  // (turn-format blocks, group nudge, sendIfEmpty, empty-send nudge) AFTER
+  // the injection point, so the marker-bearing message is no longer the last
+  // user message. When no flags exist (older hosts), fall back to the 1.0.7
+  // walk, which stops at the first trailing user message without a marker.
+  const hasHistoryFlags = messages.some((m) => (m as unknown as Record<string, unknown>).__isChatHistory === true)
+
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     const candidates = messageTextCandidates(msg.content)
@@ -164,23 +227,33 @@ function detectRegenFeedback(messages: LlmMessage[]): RegenFeedbackDetection | n
     if (msg.role === 'system') {
       for (const content of candidates) {
         const m = SYSTEM_OOC_RE.exec(content)
-        if (m) return { text: m[2].trim(), raw: m[1], position: 'system' }
+        if (m) return buildDetection(m, 'system')
       }
       // A system message that ISN'T a pure OOC marker is fine — keep walking.
       // The assembler can leave other system messages at the tail (e.g.
-      // depth-injected blocks), so non-match here is not a stop condition.
+      // depth-injected blocks, continue nudge), so non-match here is not a
+      // stop condition.
       continue
     }
 
     if (msg.role === 'user') {
       for (const content of candidates) {
         const m = TRAILING_USER_OOC_RE.exec(content) || SYSTEM_OOC_RE.exec(content)
-        if (m) return { text: m[2].trim(), raw: m[1], position: 'user' }
+        if (m) return buildDetection(m, 'user')
       }
-      // Tail user message without the marker: feedback wasn't injected
-      // in 'user' position. Stop — looking further back would risk picking
-      // up older OOC text from earlier turns.
-      return null
+      if (!hasHistoryFlags) {
+        // Legacy hosts: tail user message without the marker — feedback
+        // wasn't injected in 'user' position. Stop; looking further back
+        // would risk picking up older OOC text from earlier turns.
+        return null
+      }
+      if ((msg as unknown as Record<string, unknown>).__isChatHistory === true) {
+        // The real latest chat turn, and it carries no marker: no feedback.
+        return null
+      }
+      // Unflagged user message = preset block / nudge appended after the
+      // injection point — keep walking toward the actual chat history.
+      continue
     }
 
     // assistant or other roles — skip and keep looking
@@ -247,6 +320,37 @@ async function countTokens(
 }
 
 // ---------------------------------------------------------------------------
+// Connection profile lookup — provider/model fallback for snapshots that never
+// receive a GENERATION_BREAKDOWN_READY event (dry runs). The connections API
+// is gated behind the `generation` permission, which the manifest declares.
+// Typed loosely because lumiverse-spindle-types may predate the API.
+// ---------------------------------------------------------------------------
+const connectionInfoCache = new Map<string, { provider?: string; model?: string }>()
+
+async function resolveConnectionInfo(
+  connectionId: unknown,
+  userId?: string,
+): Promise<{ provider?: string; model?: string } | null> {
+  if (typeof connectionId !== 'string' || !connectionId) return null
+  const cached = connectionInfoCache.get(connectionId)
+  if (cached) return cached
+  try {
+    const api = (spindle as any).connections
+    if (!api?.get) return null
+    const conn = await api.get(connectionId, userId)
+    const info = {
+      provider: typeof conn?.provider === 'string' && conn.provider ? conn.provider : undefined,
+      model: typeof conn?.model === 'string' && conn.model ? conn.model : undefined,
+    }
+    if (connectionInfoCache.size > 50) connectionInfoCache.clear()
+    connectionInfoCache.set(connectionId, info)
+    return info
+  } catch {
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Dry-run detection — track active generation IDs
 // ---------------------------------------------------------------------------
 interface ActiveGenerationMeta {
@@ -264,18 +368,53 @@ function swipeKey(chatId?: string, messageId?: string): string | null {
 }
 
 function getActiveGenerationForChat(chatId?: string): { generationId: string; meta: ActiveGenerationMeta } | null {
-  let fallback: { generationId: string; meta: ActiveGenerationMeta } | null = null
-  for (const [generationId, meta] of activeGenerations) {
-    const entry = { generationId, meta }
-    fallback = entry
-    if (chatId && meta.chatId === chatId) return entry
+  // When the interceptor identifies its chat, require an exact match. Falling
+  // back to an unrelated sole active generation can misclassify a dry run in
+  // another chat as live and attach the wrong generation metadata.
+  if (chatId) {
+    for (const [generationId, meta] of activeGenerations) {
+      if (meta.chatId === chatId) return { generationId, meta }
+    }
+    return null
   }
-  return activeGenerations.size === 1 ? fallback : null
+
+  // Older hosts or unusual system prompts may omit chatId. Preserve the
+  // previous single-generation fallback only for that genuinely ambiguous case.
+  if (activeGenerations.size !== 1) return null
+  const [generationId, meta] = activeGenerations.entries().next().value as [string, ActiveGenerationMeta]
+  return { generationId, meta }
 }
 
 function prunePendingSwipes(now = Date.now()): void {
   for (const [key, value] of pendingSwipeAdds) {
     if (now - value.timestamp > 5 * 60 * 1000) pendingSwipeAdds.delete(key)
+  }
+}
+
+/**
+ * structuredClone that degrades gracefully: if the whole object can't be
+ * cloned (e.g. the host adds an AbortSignal, function, or other
+ * non-cloneable value to the interceptor context), fall back to cloning
+ * property-by-property and silently dropping the offending entries instead
+ * of failing the entire prompt capture.
+ */
+function cloneSafe<T>(value: T): T {
+  try {
+    return structuredClone(value)
+  } catch {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const out: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        try {
+          out[k] = structuredClone(v)
+        } catch {
+          // non-cloneable value — drop it from the snapshot
+        }
+      }
+      return out as T
+    }
+    // Last resort for arrays/exotic roots: JSON round-trip
+    return JSON.parse(JSON.stringify(value)) as T
   }
 }
 
@@ -299,62 +438,121 @@ function tryRegisterInterceptor(): void {
     try {
       const ctx = context as InterceptorMeta
 
+      // Lumiverse staging attaches a per-run AbortSignal to the interceptor
+      // context (for intercept_abort support). AbortSignal is not
+      // structured-cloneable, so strip it — and defensively drop any other
+      // non-cloneable values the host may add later — before snapshotting.
+      const { signal: _signal, ...cloneableCtx } =
+        ctx as InterceptorMeta & { signal?: AbortSignal }
+
+      // ONLY the clones must happen synchronously: later pipeline stages
+      // (applyPostProcessing, other interceptors) mutate the message array in
+      // place, so we must copy before returning. Everything below operates on
+      // our private copies and is deferred off the generation's critical path.
       const capturedMessages = structuredClone(messages) as LlmMessage[]
-      const snapshot: PromptSnapshot = {
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-        messages: capturedMessages,
-        context: structuredClone(ctx),
-        estimatedTokens: estimateTokensFallback(capturedMessages),
-        tokenCountSource: 'fallback',
-        approximateTokens: true,
-      }
+      const ctxSnapshot = cloneSafe(cloneableCtx) as InterceptorMeta
 
-      // Pull model/generation metadata from GENERATION_STARTED. Match by chatId
-      // so simultaneous generations in another chat do not incorrectly mark
-      // this prompt as live, attach the wrong model, or suppress dry-run labels.
-      const active = getActiveGenerationForChat(ctx.chatId)
-      snapshot.isDryRun = !active
-      if (active) {
-        snapshot.generationId = active.generationId
-        if (active.meta.model) snapshot.model = active.meta.model
+      // Operator-scoped installs require an explicit userId on spindle.tokens
+      // calls; the interceptor context carries the generation's user. Prefer
+      // it over the frontend-derived global (which may be unset before the
+      // panel is first opened, or belong to a different user on multi-user
+      // operator instances), and keep the global fresh for other call sites.
+      const ctxUserId = typeof ctxSnapshot.userId === 'string' && ctxSnapshot.userId
+        ? ctxSnapshot.userId
+        : undefined
+      if (ctxUserId) currentUserId = ctxUserId
 
-        const key = swipeKey(ctx.chatId, active.meta.targetMessageId)
-        const pendingSwipe = key ? pendingSwipeAdds.get(key) : null
-        if (pendingSwipe || active.meta.generationType === 'swipe') {
-          snapshot.isSwipe = true
-          if (pendingSwipe?.swipeIndex !== undefined) snapshot.swipeIndex = pendingSwipe.swipeIndex
+      // queueMicrotask (NOT setTimeout): microtasks drain before the worker
+      // can process any subsequent host postMessage, so activeGenerations and
+      // pendingSwipeAdds are read in exactly the state a synchronous read
+      // would have seen — a later GENERATION_ENDED cannot sneak in between.
+      queueMicrotask(() => {
+        try {
+          const snapshot: PromptSnapshot = {
+            id: crypto.randomUUID(),
+            timestamp: Date.now(),
+            messages: capturedMessages,
+            context: ctxSnapshot,
+            estimatedTokens: estimateTokensFallback(capturedMessages),
+            tokenCountSource: 'fallback',
+            approximateTokens: true,
+          }
+
+          // Staging provides an authoritative dryRun boolean in interceptor
+          // context. Trust it when present; only infer from generation events
+          // for compatibility with older hosts that do not provide the flag.
+          // A confirmed dry run must never inherit metadata from a coincident
+          // live generation, even if one exists for the same chat.
+          const contextDryRun = typeof ctxSnapshot.dryRun === 'boolean'
+            ? ctxSnapshot.dryRun
+            : undefined
+          const active = contextDryRun === true
+            ? null
+            : getActiveGenerationForChat(ctxSnapshot.chatId)
+          snapshot.isDryRun = contextDryRun ?? !active
+          if (snapshot.isDryRun && typeof ctxSnapshot.chatId === 'string') {
+            const evidence = consumeAutoDryRunEvidence(ctxSnapshot.chatId, Date.now())
+            if (evidence) {
+              snapshot.isLikelyAutoDryRun = true
+              snapshot.autoDryRunEvidence = evidence
+            }
+          }
+          if (active) {
+            snapshot.generationId = active.generationId
+            if (active.meta.model) snapshot.model = active.meta.model
+
+            const key = swipeKey(ctxSnapshot.chatId, active.meta.targetMessageId)
+            const pendingSwipe = key ? pendingSwipeAdds.get(key) : null
+            if (pendingSwipe || active.meta.generationType === 'swipe') {
+              snapshot.isSwipe = true
+              if (pendingSwipe?.swipeIndex !== undefined) snapshot.swipeIndex = pendingSwipe.swipeIndex
+            }
+          }
+
+          // Async token count — fire and forget, update snapshot when ready
+          countTokens(capturedMessages, snapshot.model, ctxUserId ?? currentUserId).then((result) => {
+            snapshot.estimatedTokens = result.tokens
+            snapshot.approximateTokens = result.approximate
+            snapshot.tokenCountSource = result.source
+            if (result.tokenizer) snapshot.tokenizer = result.tokenizer
+            if (result.tokenModel) snapshot.tokenModel = result.tokenModel
+            if (result.tokenModelSource) snapshot.tokenModelSource = result.tokenModelSource
+            if (result.error) snapshot.tokenizerError = result.error
+            spindle.sendToFrontend({ type: 'snapshot_updated', snapshot })
+          })
+
+          // Provider fallback — GENERATION_BREAKDOWN_READY fills provider for
+          // live generations, but never fires for dry runs. Resolve it from
+          // the connection profile (cached) so dry-run snapshots aren't bare.
+          resolveConnectionInfo(ctxSnapshot.connectionId, ctxUserId ?? currentUserId).then((info) => {
+            if (!info) return
+            let changed = false
+            if (!snapshot.provider && info.provider) { snapshot.provider = info.provider; changed = true }
+            if (!snapshot.model && info.model) { snapshot.model = info.model; changed = true }
+            if (changed) spindle.sendToFrontend({ type: 'snapshot_updated', snapshot })
+          })
+
+          // OOC marker detection. Runs unconditionally (no generationType gate)
+          // so composer-regen, swipe, and the explicit regenerate path all
+          // surface the banner. See detectRegenFeedback() for caveats.
+          const detected = detectRegenFeedback(capturedMessages)
+          if (detected) {
+            snapshot.regenFeedback = detected.text
+            snapshot.regenFeedbackRaw = detected.raw
+            snapshot.regenFeedbackPosition = detected.position
+            if (detected.rejectedMessage !== undefined) snapshot.rejectedMessage = detected.rejectedMessage
+          }
+
+          store.push(snapshot)
+          activeChatId = ctxSnapshot.chatId ?? activeChatId
+
+          spindle.sendToFrontend({
+            type: 'prompt_captured',
+            snapshot,
+          })
+        } catch (err: any) {
+          spindle.log.error(`Failed to capture prompt: ${err?.message ?? err}`)
         }
-      }
-
-      // Async token count — fire and forget, update snapshot when ready
-      countTokens(capturedMessages, snapshot.model, currentUserId).then((result) => {
-        snapshot.estimatedTokens = result.tokens
-        snapshot.approximateTokens = result.approximate
-        snapshot.tokenCountSource = result.source
-        if (result.tokenizer) snapshot.tokenizer = result.tokenizer
-        if (result.tokenModel) snapshot.tokenModel = result.tokenModel
-        if (result.tokenModelSource) snapshot.tokenModelSource = result.tokenModelSource
-        if (result.error) snapshot.tokenizerError = result.error
-        spindle.sendToFrontend({ type: 'snapshot_updated', snapshot })
-      })
-
-      // OOC marker detection. Runs unconditionally (no generationType gate)
-      // so composer-regen, swipe, and the explicit regenerate path all
-      // surface the banner. See detectRegenFeedback() for caveats.
-      const detected = detectRegenFeedback(capturedMessages)
-      if (detected) {
-        snapshot.regenFeedback = detected.text
-        snapshot.regenFeedbackRaw = detected.raw
-        snapshot.regenFeedbackPosition = detected.position
-      }
-
-      store.push(snapshot)
-      activeChatId = ctx.chatId ?? activeChatId
-
-      spindle.sendToFrontend({
-        type: 'prompt_captured',
-        snapshot,
       })
     } catch (err: any) {
       spindle.log.error(`Failed to capture prompt: ${err?.message ?? err}`)
@@ -371,7 +569,8 @@ function tryRegisterGenerationEvents(): void {
   if (generationEventsRegistered) return
   if (!spindle.permissions.has('generation')) return
 
-  spindle.on('GENERATION_STARTED', (payload: any) => {
+  spindle.on('GENERATION_STARTED', (payload: any, userId?: string) => {
+    if (typeof userId === 'string' && userId) currentUserId = userId
     if (payload.generationId) {
       activeGenerations.set(payload.generationId, {
         chatId: payload.chatId,
@@ -382,7 +581,40 @@ function tryRegisterGenerationEvents(): void {
     }
   })
 
-  spindle.on('GENERATION_ENDED', async (payload: any) => {
+  // Final outbound parameters, provider, preset, and real usage. Emitted by
+  // the host's deferred post-processing after a live generation completes
+  // (never for dry runs), carrying the same ground-truth data the native
+  // Prompt Breakdown renders. Linked to our snapshot by generationId.
+  spindle.on('GENERATION_BREAKDOWN_READY', (payload: any, userId?: string) => {
+    if (typeof userId === 'string' && userId) currentUserId = userId
+    const b = payload?.breakdown
+    if (!payload?.generationId || !b || typeof b !== 'object') return
+
+    const usage = b.usage && typeof b.usage === 'object'
+      ? {
+          prompt_tokens: typeof b.usage.prompt_tokens === 'number' ? b.usage.prompt_tokens : undefined,
+          completion_tokens: typeof b.usage.completion_tokens === 'number' ? b.usage.completion_tokens : undefined,
+          total_tokens: typeof b.usage.total_tokens === 'number' ? b.usage.total_tokens : undefined,
+        }
+      : undefined
+
+    const snap = store.attachGenerationInfo(payload.generationId, {
+      parameters: b.parameters && typeof b.parameters === 'object' && !Array.isArray(b.parameters)
+        ? b.parameters as Record<string, unknown>
+        : undefined,
+      provider: typeof b.provider === 'string' && b.provider ? b.provider : undefined,
+      presetName: typeof b.presetName === 'string' && b.presetName ? b.presetName : undefined,
+      usage,
+      maxContext: typeof b.maxContext === 'number' && b.maxContext > 0 ? b.maxContext : undefined,
+      model: typeof b.model === 'string' && b.model ? b.model : undefined,
+    })
+    if (snap) {
+      spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: snap })
+    }
+  })
+
+  spindle.on('GENERATION_ENDED', async (payload: any, userId?: string) => {
+    if (typeof userId === 'string' && userId) currentUserId = userId
     const genId = payload.generationId
     if (genId) {
       activeGenerations.delete(genId)
@@ -439,9 +671,87 @@ spindle.permissions.onChanged(({ permission, granted }) => {
 // ---------------------------------------------------------------------------
 // Chat tracking (free tier — no permission needed)
 // ---------------------------------------------------------------------------
+// Automatic Dry Run heuristics. Lumiverse authoritatively identifies Dry Runs,
+// but does not expose who requested one. Prompt Viewer therefore keeps a
+// single, one-shot lifecycle evidence record per chat and labels a subsequent
+// Dry Run as *likely* automatic when it arrives within the relevant window.
+const CHAT_ENTRY_DRY_RUN_WINDOW_MS = 4000
+const REGEN_MUTATION_DRY_RUN_WINDOW_MS = 10_000
+
+interface PendingAutoDryRunEvidence {
+  reason: LikelyAutoDryRunReason
+  timestamp: number
+  messageId?: string
+}
+
+const pendingAutoDryRunEvidence = new Map<string, PendingAutoDryRunEvidence>()
+
+function evidenceWindowMs(reason: LikelyAutoDryRunReason): number {
+  return reason === 'chat-entry'
+    ? CHAT_ENTRY_DRY_RUN_WINDOW_MS
+    : REGEN_MUTATION_DRY_RUN_WINDOW_MS
+}
+
+function prunePendingAutoDryRunEvidence(now = Date.now()): void {
+  for (const [chatId, evidence] of pendingAutoDryRunEvidence) {
+    if (now - evidence.timestamp >= evidenceWindowMs(evidence.reason)) {
+      pendingAutoDryRunEvidence.delete(chatId)
+    }
+  }
+}
+
+function markPendingAutoDryRunEvidence(
+  chatId: string,
+  reason: LikelyAutoDryRunReason,
+  options: { now?: number; messageId?: string } = {},
+): void {
+  const now = options.now ?? Date.now()
+  prunePendingAutoDryRunEvidence(now)
+  pendingAutoDryRunEvidence.set(chatId, {
+    reason,
+    timestamp: now,
+    messageId: options.messageId,
+  })
+}
+
+function consumeAutoDryRunEvidence(chatId: string, now: number): AutoDryRunEvidence | undefined {
+  const evidence = pendingAutoDryRunEvidence.get(chatId)
+  if (!evidence) return undefined
+
+  // Always consume once. An expired or coincidental marker must not tag a
+  // later Dry Run merely because no earlier capture used it.
+  pendingAutoDryRunEvidence.delete(chatId)
+
+  const ageMs = Math.max(0, now - evidence.timestamp)
+  if (ageMs >= evidenceWindowMs(evidence.reason)) return undefined
+
+  return {
+    reason: evidence.reason,
+    observedAt: evidence.timestamp,
+    ageMs,
+    messageId: evidence.messageId,
+  }
+}
+
+/**
+ * MESSAGE_DELETED only exposes IDs, not the deleted role or the user's action.
+ * When PV has a linked live-generation capture, require the deletion to match
+ * the latest such message. If linkage is unavailable, preserve compatibility
+ * and allow the short-lived heuristic rather than silently missing regens.
+ */
+function isLikelyRegenerationDeletion(chatId: string, messageId?: string): boolean {
+  if (!messageId) return false
+  const latestLinkedLive = store.getAll(chatId)
+    .find((snapshot) => !snapshot.isDryRun && typeof snapshot.messageId === 'string')
+  return latestLinkedLive ? latestLinkedLive.messageId === messageId : true
+}
+
 spindle.on('CHAT_SWITCHED', (payload: any) => {
   const chatId = payload.chatId ?? null
   activeChatId = chatId
+  if (chatId) {
+    markPendingAutoDryRunEvidence(chatId, 'chat-entry')
+  }
 
   spindle.sendToFrontend({
     type: 'chat_changed',
@@ -457,6 +767,19 @@ spindle.on('MESSAGE_SWIPED', (payload: any) => {
   if (payload.action !== 'added') return
   const chatId = payload.chatId
   if (!chatId) return
+
+  // Lumiverse stages regenerate/swipe generations by adding a blank swipe
+  // before prompt assembly. Some extensions react to that mutation by issuing
+  // their own Dry Run. Record a one-shot marker so only the next Dry Run for
+  // this chat can be tagged as automatic.
+  const addedSwipe = Array.isArray(payload.message?.swipes)
+    ? payload.message.swipes[payload.swipeId]
+    : undefined
+  if (addedSwipe === '' || payload.message?.content === '') {
+    markPendingAutoDryRunEvidence(chatId, 'regen-mutation', {
+      messageId: typeof payload.message?.id === 'string' ? payload.message.id : undefined,
+    })
+  }
 
   prunePendingSwipes()
   const messageId = payload.message?.id
@@ -475,6 +798,19 @@ spindle.on('MESSAGE_SWIPED', (payload: any) => {
 spindle.on('MESSAGE_DELETED', async (payload: any) => {
   const chatId = payload.chatId || activeChatId
   if (!chatId) return
+
+  // Composer Regenerate deletes the prior assistant message before prompt
+  // assembly. Treat that as one-shot evidence only when it matches PV's latest
+  // linked live generation (or when linkage is unavailable and cannot be
+  // checked). Deleting an older captured message will not tag the next Dry Run.
+  const deletedMessageId = typeof payload.messageId === 'string'
+    ? payload.messageId
+    : undefined
+  if (isLikelyRegenerationDeletion(chatId, deletedMessageId)) {
+    markPendingAutoDryRunEvidence(chatId, 'regen-mutation', {
+      messageId: deletedMessageId,
+    })
+  }
 
   let removed = 0
 
