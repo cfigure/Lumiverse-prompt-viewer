@@ -30,6 +30,7 @@ interface PromptSnapshot {
   messageId?: string
   messageNumber?: number
   isDryRun?: boolean
+  isAutoDryRun?: boolean
   model?: string
   regenFeedback?: string
   regenFeedbackRaw?: string
@@ -61,6 +62,7 @@ interface Settings {
   showTokenizerSource: boolean
   hideInternalMarkers: boolean
   renderedBreakdownStyle: boolean
+  hideAutoDryRuns: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -73,6 +75,7 @@ const DEFAULT_SETTINGS: Settings = {
   showTokenizerSource: true,
   hideInternalMarkers: false,
   renderedBreakdownStyle: false,
+  hideAutoDryRuns: true,
 }
 
 // Keys the host stamps onto interceptor messages for assembly bookkeeping.
@@ -312,6 +315,7 @@ function createSettingsUI(
     addRow('Show Regen Feedback at top', mountSwitch(local.showRegenFeedback, 'Show Regen Feedback at top', (checked) => commit({ showRegenFeedback: checked }, status)))
     addRow('Show tokenizer source', mountSwitch(local.showTokenizerSource, 'Show tokenizer source', (checked) => commit({ showTokenizerSource: checked }, status)))
     addRow('Hide Lumiverse markers in JSON', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in JSON', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides internal assembly bookkeeping keys (_fromSystem, __isChatHistory, sourceMessageId, …) from the JSON view and JSON copy. Display-only — the capture stays lossless.')
+    addRow('Hide automatic chat-entry dry runs', mountSwitch(local.hideAutoDryRuns, 'Hide automatic chat-entry dry runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Some extensions trigger a dry run when you enter a chat. These are tagged by timing (captured within a few seconds of switching chats) and hidden from views and the badge — still stored, and shown with an [auto] tag when this is off.')
     addRow('Prompt Breakdown-style Rendered', mountSwitch(local.renderedBreakdownStyle, 'Prompt Breakdown-style Rendered', (checked) => commit({ renderedBreakdownStyle: checked }, status)), 'Adds a # provider / model heading, ### [N] ROLE separators, and a ### PARAMETERS tail to the Rendered view and its copy, matching the native Prompt Breakdown Raw output.')
     addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
     card.appendChild(status)
@@ -604,6 +608,35 @@ export function setup(ctx: SpindleFrontendContext) {
     // into the assembled prompt (rather than reconstructing it from inner text).
     // Position label reflects the slot the OOC marker actually occupies in the
     // assembled prompt — see detectRegenFeedback() in backend.ts.
+
+    const usageLine = snap.usage && (snap.usage.prompt_tokens != null || snap.usage.completion_tokens != null)
+      ? `Usage: ${snap.usage.prompt_tokens ?? '?'} prompt / ${snap.usage.completion_tokens ?? '?'} completion tokens`
+      : null
+
+    // Flat key: value lines to match the rest of the context box — the JSON
+    // view and PB-style Rendered keep the JSON form. Non-primitive values
+    // (e.g. logit_bias maps) are compact-stringified on one line.
+    const paramsLines = snap.parameters && Object.keys(snap.parameters).length > 0
+      ? 'Parameters:\n' + Object.entries(snap.parameters)
+          .map(([k, v]) => `  ${k}: ${typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}`)
+          .join('\n')
+      : null
+
+    ctxBlock.textContent = [
+      `Generation: ${genType}${snap.swipeIndex != null ? ` #${snap.swipeIndex}` : ''}${snap.wasAborted ? ' (aborted)' : ''}`,
+      `Chat: ${meta.chatId ?? '?'}`,
+      `Connection: ${meta.connectionId ?? '?'}`,
+      `Persona: ${meta.personaId ?? '?'}`,
+      snap.model ? `Model: ${snap.model}` : null,
+      snap.provider ? `Provider: ${snap.provider}` : null,
+      snap.presetName ? `Preset: ${snap.presetName}` : null,
+      snap.maxContext ? `Max context: ${snap.maxContext}` : null,
+      usageLine,
+      worldInfoLine,
+      paramsLines,
+    ].filter(Boolean).join('\n')
+    messagesEl.appendChild(ctxBlock)
+
     if ((snap.regenFeedback || snap.rejectedMessage) && settings.showRegenFeedback) {
       const oocBanner = document.createElement('div')
       oocBanner.className = 'pv-context-block pv-ooc-block'
@@ -653,34 +686,6 @@ export function setup(ctx: SpindleFrontendContext) {
 
       messagesEl.appendChild(oocBanner)
     }
-
-    const usageLine = snap.usage && (snap.usage.prompt_tokens != null || snap.usage.completion_tokens != null)
-      ? `Usage: ${snap.usage.prompt_tokens ?? '?'} prompt / ${snap.usage.completion_tokens ?? '?'} completion tokens`
-      : null
-
-    // Flat key: value lines to match the rest of the context box — the JSON
-    // view and PB-style Rendered keep the JSON form. Non-primitive values
-    // (e.g. logit_bias maps) are compact-stringified on one line.
-    const paramsLines = snap.parameters && Object.keys(snap.parameters).length > 0
-      ? 'Parameters:\n' + Object.entries(snap.parameters)
-          .map(([k, v]) => `  ${k}: ${typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}`)
-          .join('\n')
-      : null
-
-    ctxBlock.textContent = [
-      `Generation: ${genType}${snap.swipeIndex != null ? ` #${snap.swipeIndex}` : ''}${snap.wasAborted ? ' (aborted)' : ''}`,
-      `Chat: ${meta.chatId ?? '?'}`,
-      `Connection: ${meta.connectionId ?? '?'}`,
-      `Persona: ${meta.personaId ?? '?'}`,
-      snap.model ? `Model: ${snap.model}` : null,
-      snap.provider ? `Provider: ${snap.provider}` : null,
-      snap.presetName ? `Preset: ${snap.presetName}` : null,
-      snap.maxContext ? `Max context: ${snap.maxContext}` : null,
-      usageLine,
-      worldInfoLine,
-      paramsLines,
-    ].filter(Boolean).join('\n')
-    messagesEl.appendChild(ctxBlock)
 
     // Show individual world info entries if any
     if (worldInfoArr.length > 0 && settings.showWorldInfo) {
@@ -786,7 +791,7 @@ export function setup(ctx: SpindleFrontendContext) {
     else if (viewMode === 'rendered') renderRendered(snap)
     else renderFormatted(snap)
 
-    const dryLabel = snap.isDryRun ? '[DRY RUN] ' : ''
+    const dryLabel = snap.isAutoDryRun ? '[AUTO DRY RUN] ' : snap.isDryRun ? '[DRY RUN] ' : ''
     const abortLabel = snap.wasAborted ? '[ABORTED] ' : ''
     const msgLabel = snap.messageNumber != null ? `Msg #${snap.messageNumber} · ` : ''
     const swipeLabel = snap.swipeIndex != null ? `Swipe #${snap.swipeIndex} · ` : ''
@@ -799,9 +804,10 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function getFilteredHistory(): PromptSnapshot[] {
-    if (!showDryRuns) return history.filter((s) => !s.isDryRun)
-    if (settings.dryRunMode === 'alongside') return history
-    return history.filter((s) => s.isDryRun)
+    const base = settings.hideAutoDryRuns ? history.filter((s) => !s.isAutoDryRun) : history
+    if (!showDryRuns) return base.filter((s) => !s.isDryRun)
+    if (settings.dryRunMode === 'alongside') return base
+    return base.filter((s) => s.isDryRun)
   }
 
   function populateSelect(): void {
@@ -818,7 +824,7 @@ export function setup(ctx: SpindleFrontendContext) {
       const opt = document.createElement('option')
       opt.value = snap.id
       const prefix = i === 0 ? '● ' : ''
-      const dryTag = snap.isDryRun ? '[DRY] ' : ''
+      const dryTag = snap.isAutoDryRun ? '[DRY·auto] ' : snap.isDryRun ? '[DRY] ' : ''
       const oocTag = snap.regenFeedback ? '[OOC] ' : ''
       const abortTag = snap.wasAborted ? '[✗] ' : ''
       const rawGt = String((snap.context as any)?.generationType ?? '')
@@ -933,9 +939,10 @@ export function setup(ctx: SpindleFrontendContext) {
         if (history.length > settings.maxHistoryPerChat) history.pop()
         populateSelect()
         const isDry = snap.isDryRun
-        const isVisible = !showDryRuns
+        const hiddenAuto = snap.isAutoDryRun && settings.hideAutoDryRuns
+        const isVisible = !hiddenAuto && (!showDryRuns
           ? !isDry
-          : settings.dryRunMode === 'alongside' || isDry
+          : settings.dryRunMode === 'alongside' || isDry)
         if (isVisible) {
           select.value = snap.id
           renderSnapshot(snap)

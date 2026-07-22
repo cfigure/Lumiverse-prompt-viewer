@@ -24,6 +24,7 @@ interface Settings {
   showTokenizerSource: boolean
   hideInternalMarkers: boolean
   renderedBreakdownStyle: boolean
+  hideAutoDryRuns: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -36,6 +37,7 @@ const DEFAULT_SETTINGS: Settings = {
   showTokenizerSource: true,
   hideInternalMarkers: false,
   renderedBreakdownStyle: false,
+  hideAutoDryRuns: true,
 }
 
 async function loadSettings(): Promise<Settings> {
@@ -472,6 +474,12 @@ function tryRegisterInterceptor(): void {
           // suppress dry-run labels.
           const active = getActiveGenerationForChat(ctxSnapshot.chatId)
           snapshot.isDryRun = !active
+          if (snapshot.isDryRun && typeof ctxSnapshot.chatId === 'string') {
+            const switchedAt = lastChatSwitchAt.get(ctxSnapshot.chatId)
+            if (switchedAt !== undefined && Date.now() - switchedAt < AUTO_DRY_RUN_WINDOW_MS) {
+              snapshot.isAutoDryRun = true
+            }
+          }
           if (active) {
             snapshot.generationId = active.generationId
             if (active.meta.model) snapshot.model = active.meta.model
@@ -646,9 +654,21 @@ spindle.permissions.onChanged(({ permission, granted }) => {
 // ---------------------------------------------------------------------------
 // Chat tracking (free tier — no permission needed)
 // ---------------------------------------------------------------------------
+// Timestamp of the most recent CHAT_SWITCHED per chat, for the auto-dry-run
+// heuristic: a dry run captured this soon after entering a chat, with no user
+// action, is almost certainly another extension's chat-open probe (e.g. a
+// spindle.generate.dryRun call to precompute stats). The host provides no
+// requester identity, so timing inference is the best available signal.
+const AUTO_DRY_RUN_WINDOW_MS = 4000
+const lastChatSwitchAt = new Map<string, number>()
+
 spindle.on('CHAT_SWITCHED', (payload: any) => {
   const chatId = payload.chatId ?? null
   activeChatId = chatId
+  if (chatId) {
+    if (lastChatSwitchAt.size > 100) lastChatSwitchAt.clear()
+    lastChatSwitchAt.set(chatId, Date.now())
+  }
 
   spindle.sendToFrontend({
     type: 'chat_changed',

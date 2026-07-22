@@ -36,6 +36,11 @@ export interface PromptSnapshot {
   messageId?: string
   messageNumber?: number
   isDryRun?: boolean
+  /** Heuristic: dry run captured within a short window of CHAT_SWITCHED with no
+   *  user action — almost certainly triggered by another extension on chat
+   *  entry (the host passes no requester identity, so this is inference).
+   *  Tagged, never dropped; the frontend hides these behind a setting. */
+  isAutoDryRun?: boolean
   model?: string
   /** OOC feedback text extracted from a regen-with-feedback generation
    *  (inner text only, no `[OOC: ]` wrapping). Used for clipboard / programmatic access. */

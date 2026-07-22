@@ -172,15 +172,17 @@ export const PANEL_CSS = /* css */ `
     color: hsl(35, 55%, 70%);
   }
 
-  /* ---- Parameters block ---- */
-  .pv-params-block .pv-message-header {
-    background: color-mix(in srgb, var(--lumiverse-fill) 70%, hsl(170, 40%, 38%));
-    color: hsl(170, 40%, 68%);
-  }
-  .pv-params-body {
+  /* ---- Rendered view: Prompt Breakdown-style headings/separators ---- */
+  .pv-rendered-sep {
     font-family: monospace;
     font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: var(--lumiverse-text-muted);
+    margin: 14px 0 6px;
+    white-space: pre-wrap;
   }
+  .pv-rendered-sep:first-child { margin-top: 0; }
 
   /* ---- World Info entries block ---- */
   .pv-wi-block {
