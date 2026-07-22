@@ -318,7 +318,7 @@ function createSettingsUI(
     addRow('Show tokenizer source', mountSwitch(local.showTokenizerSource, 'Show tokenizer source', (checked) => commit({ showTokenizerSource: checked }, status)))
     addRow('Hide Lumiverse markers in JSON', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in JSON', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides Lumiverse bookkeeping keys from JSON view and copy.')
     addRow('Hide automatic chat-entry dry runs', mountSwitch(local.hideAutoDryRuns, 'Hide automatic chat-entry dry runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Hides likely chat-entry dry runs. They remain stored.')
-    addRow('Prompt Breakdown-style Rendered', mountSwitch(local.renderedBreakdownStyle, 'Prompt Breakdown-style Rendered', (checked) => commit({ renderedBreakdownStyle: checked }, status)))
+    addRow('Format Rendered like Prompt Breakdown', mountSwitch(local.renderedBreakdownStyle, 'Format Rendered like Prompt Breakdown', (checked) => commit({ renderedBreakdownStyle: checked }, status)), 'Adds Prompt Breakdown-style headings, role labels, and parameters.')
     addRow('Expand prompt blocks to full height', mountSwitch(local.expandPromptBlocks, 'Expand prompt blocks to full height', (checked) => commit({ expandPromptBlocks: checked }, status)), 'Lets formatted sections grow beyond the default 400px cap.')
     addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
     card.appendChild(status)
