@@ -1,68 +1,144 @@
 # Prompt Viewer
 
-A Spindle extension for [Lumiverse](https://github.com/prolix-oc/Lumiverse) that lets you inspect the fully assembled prompt from real generations — captured at the end of Lumiverse's interceptor pipeline, immediately before hand-off to the LLM provider.
+Prompt Viewer is a Spindle extension for [Lumiverse](https://github.com/prolix-oc/Lumiverse) that captures and displays the assembled prompt used by real generations and dry runs.
+
+It is intended for inspecting prompt order, resolved message content, World Info activation, regeneration feedback, token estimates, and—after a completed live generation—the final parameters published by Lumiverse's Prompt Breakdown pipeline.
 
 ## Features
 
-- **Real-generation capture** — See the assembled messages from actual generations as they leave the interceptor pipeline, not a reconstruction or preview
-- **Three view modes** — Formatted (collapsible, colour-coded), Raw (JSON), Rendered (plain text)
-- **Token counting with source labels** — Uses Lumiverse's tokenizer when available, distinguishing native counts, Lumiverse approximate counts, and Prompt Viewer chars/4 fallback
-- **OOC feedback capture** — Regen-with-feedback instructions are extracted and displayed separately
-- **World Info display** — Shows activated entries with source type and vector scores
-- **Swipe vs regen labels** — Swipes are distinguished from plain regens with pending-swipe race handling
-- **Abort tracking** — Stopped generations are marked
-- **Dry-run separation** — Hidden by default, toggle with ⚡
-- **Per-chat history** — Captures auto-refresh on chat switch
-- **Message linking** — Each prompt shows the message number it produced
-- **In-memory only** — History clears on restart, settings persist
+- **Real prompt capture** — Records the message array from Lumiverse's interceptor pipeline rather than reconstructing it from the chat.
+- **Three views** — Inspect a prompt as formatted blocks, JSON, or rendered plain text.
+- **Expandable prompt blocks** — Message blocks grow with their content and can be collapsed individually or together.
+- **Per-block copying** — Copy any message, OOC feedback block, or rejected-message block. The button confirms with `✓ Copied`.
+- **Prompt-wide copying** — Copies the current view, so JSON and Rendered exports match what is shown on screen.
+- **Generation metadata** — Shows generation type, chat, connection, persona, model, provider, preset, context size, usage, and resolved parameters when available.
+- **Token counting** — Uses Lumiverse's native tokenizer where possible and labels approximate or fallback estimates.
+- **World Info inspection** — Lists activated entries, source types, keywords, and vector scores.
+- **Regeneration feedback** — Separates injected OOC feedback from the prompt and can expose an included rejected message in its own expandable block.
+- **Swipe and abort tracking** — Distinguishes swipes from ordinary regenerations and marks stopped generations.
+- **Dry-run handling** — Keeps dry runs separate from normal captures and can hide likely automatic chat-entry dry runs.
+- **Per-chat history** — Maintains an in-memory prompt history for each chat and refreshes it when chats change.
+- **Message linking** — Links captures to the chat message and swipe they produced when Lumiverse supplies that information.
 
 ## Installation
 
-Install from URL in **Settings → Extensions**:
+In Lumiverse, open **Settings → Extensions**, choose the option to install from a URL, and enter:
 
 ```text
 https://github.com/cfigure/Lumiverse-prompt-viewer
 ```
 
-After granting permissions on first install, you may need to toggle the extension off and on once.
+Approve the requested permissions when prompted. If the extension panel does not appear immediately after first installation, toggle the extension off and on once or reload Lumiverse.
 
-## Permissions
+## Using Prompt Viewer
 
-- `interceptor` — captures assembled chat prompts.
-- `generation` — tracks generation lifecycle events for model/action tagging.
-- `chat_mutation` — reads chat messages for message numbering and deletion reconciliation.
-- `chats` — keeps chat switching/current-chat behaviour compatible across Lumiverse builds.
+Open the **Prompt Viewer** extension tab after sending a message or running a dry run. The history selector shows captures for the current chat, newest first.
+
+The toolbar provides:
+
+| Control | Purpose |
+|---|---|
+| History selector | Choose a captured prompt from the current chat |
+| Refresh | Request the latest history from the backend |
+| Copy | Copy the current prompt using the active view format |
+| Clear | Clear captured history for the current chat |
+| JSON | Toggle the JSON view |
+| Rendered | Toggle the rendered plain-text view |
+| Dry Runs | Show or hide dry-run captures according to the configured dry-run mode |
+| ▼ All / ▶ All | Collapse or expand all blocks; shown only in the formatted view |
+| ⚙ | Open Prompt Viewer settings |
+
+### Formatted view
+
+The default view presents generation metadata, optional OOC feedback, activated World Info, and each prompt message as a separate role-coloured block.
+
+Click a message header to collapse or expand it. Expanded blocks grow to fit their content instead of creating a fixed-height inner scroll area.
+
+When regeneration feedback includes a rejected message, that rejected message starts collapsed. Expanding it also expands the enclosing OOC panel so the complete text is visible.
+
+### JSON view
+
+JSON view exports an object with the following shape:
+
+```json
+{
+  "messages": [],
+  "parameters": {},
+  "model": "...",
+  "provider": "..."
+}
+```
+
+Fields that are not yet available are omitted. The **Hide Lumiverse markers in JSON** setting can remove internal assembly bookkeeping properties from the displayed and copied JSON without altering the stored capture.
+
+### Rendered view
+
+Rendered view displays the prompt as plain text. With **Prompt Breakdown-style Rendered** enabled, it uses provider/model headings, numbered role separators, and a final parameters section similar to Lumiverse's native Prompt Breakdown raw output.
 
 ## Settings
 
-Accessible from **Settings → Extensions → Prompt Viewer** or the ⚙ button in the toolbar.
+Settings are available from **Settings → Extensions → Prompt Viewer** or the **⚙** button in the Prompt Viewer toolbar. Changes are saved automatically.
 
 | Setting | Default | Description |
-|---|---|---|
-| Default view mode | Formatted | Formatted, Raw, or Rendered |
-| Show dry runs by default | Off | Include dry-run prompts in history |
-| Dry run display | Dry runs only | Show dry runs only, or alongside normal prompts |
-| Show World Info entries | On | Display activated World Info entries with source type and scores |
-| Show Regen Feedback at top | On | Display the OOC feedback banner above the prompt |
-| Max prompts per chat | 50 | 5–500; higher values use more memory |
-| Show tokenizer source | On | Show whether the token number came from native Lumiverse token counting, Lumiverse approximate counting, or Prompt Viewer fallback |
+|---|---:|---|
+| Default view mode | Formatted | Choose Formatted, JSON, or Rendered as the initial view |
+| Show dry runs by default | Off | Open the viewer with dry-run captures enabled |
+| Dry run display | Dry runs only | Show only dry runs while the dry-run toggle is active, or show them alongside normal prompts |
+| Show World Info entries | On | Display the individual activated World Info entries |
+| Show Regen Feedback at top | On | Display extracted OOC regeneration feedback above the prompt messages |
+| Show tokenizer source | On | Label native, Lumiverse-estimated, and fallback token counts |
+| Hide Lumiverse markers in JSON | Off | Hide internal assembly keys from JSON display and JSON copy only |
+| Hide automatic chat-entry dry runs | On | Hide dry runs inferred to have been triggered automatically shortly after entering a chat |
+| Prompt Breakdown-style Rendered | Off | Format Rendered view with headings, role separators, and a parameters tail |
+| Max prompts per chat | 50 | Retain 5–500 captures per chat; larger histories use more memory |
 
-Settings autosave as soon as they are changed.
+## Sampler parameters and generation timing
 
-## Known Limitations
+Sampler settings are resolved by Lumiverse before the provider request is sent, but the current Spindle extension API does not expose the final merged parameter object to Prompt Viewer at that pre-send point.
 
-- **Prompt Viewer captures the prompt at the end of the interceptor pipeline — the latest point Lumiverse's extension API exposes.** This reflects the fully assembled prompt content, including everything applied during assembly: macro resolution, world info, context clipping, and the preset's merge options (Squash System Messages, Collapse to Single User Message). 
-- **Raw output includes Lumiverse-internal bookkeeping keys.** Captured message objects carry properties Lumiverse uses internally — e.g. `_fromSystem` (Squash System Messages bookkeeping, added in Lumiverse 1.0.0) and `__chatHistorySource` / `sourceMessageId` / `sourceIndexInChat` on chat-history turns. These are in-memory tags only and are never sent to the model: providers rebuild the outgoing request from just `role` and `content`. Lumiverse's native Prompt Breakdown and Dry Run views show the same keys, as they serialize the same objects.
-- **Token counts may be approximate.** Token counts use Lumiverse’s native token counter when available. If Lumiverse does not have an exact tokenizer for the active model, it may return a rough estimate. Prompt Viewer also keeps a final fallback estimate based on character count.
-- **OOC extraction is regex-based.** The interceptor context doesn't expose regen feedback directly, so the extension pattern-matches `[OOC: ...]` from message content. User-authored OOC text that exactly matches Lumiverse's injected shape may still be detected as regen feedback.
-- **Swipe labeling is best-effort.** Prompt Viewer now tracks pending swipe-add events and applies them when the interceptor snapshot arrives, but very unusual event ordering can still leave a capture as Regen until a later update.
-- **Deletion cleanup is best-effort.** Deleting messages that had multiple swipes or rapid regens may leave orphaned snapshots in the history. This is a timing issue — snapshots that haven't been linked to a message yet can't be cleaned up by message ID. Clearing all history with ✕ will always remove everything.
+For completed live generations, Prompt Viewer attaches the final parameters, provider, preset, token usage, model, and maximum context after Lumiverse emits `GENERATION_BREAKDOWN_READY`. This is the same host-generated breakdown data used by Lumiverse's native Prompt Breakdown feature.
+
+Consequences:
+
+- The prompt messages can appear before the generation finishes.
+- Final parameters and usage may be added to that capture later.
+- Dry runs do not emit the completed-generation breakdown event, so they may not include final parameters, preset, or usage.
+- A stopped or failed generation may also lack some late breakdown fields.
+
+This is an API timing limitation rather than a limitation in when Lumiverse itself knows the sampler settings.
+
+## Permissions
+
+Prompt Viewer requests:
+
+| Permission | Use |
+|---|---|
+| `interceptor` | Capture assembled prompt messages and interceptor context |
+| `generation` | Track generation lifecycle, final breakdown data, model information, and abort state |
+| `chat_mutation` | Reconcile captured prompts with created and deleted chat messages |
+| `chats` | Support current-chat and chat-switch behaviour across Lumiverse builds |
+
+## Data and privacy
+
+Prompt captures are held **in memory only**. They are not written to disk and are cleared when the extension or Lumiverse restarts. Extension settings are persisted by Lumiverse.
+
+Prompt Viewer does not modify the prompt returned to Lumiverse. It clones the serializable prompt data for display and omits runtime-only values such as the interceptor cancellation signal from its snapshot.
+
+## Known limitations
+
+- **Capture point:** Prompt Viewer records messages at its late interceptor position. The extension API does not provide a separate hook containing the exact final provider request body.
+- **Provider normalization:** The resolved parameters shown by Prompt Breakdown may still differ from an exact provider HTTP payload if a provider adapter renames, omits, or normalizes fields.
+- **Internal JSON markers:** Lumiverse may attach bookkeeping keys such as `_fromSystem`, `__isChatHistory`, `sourceMessageId`, and `sourceIndexInChat` to in-memory message objects. Providers rebuild their request from supported message fields; these markers are not prompt text. They can be hidden with the JSON marker setting.
+- **Token counts:** Counts are exact only when Lumiverse has an appropriate tokenizer for the active model. Otherwise Lumiverse or Prompt Viewer may provide an estimate.
+- **OOC detection:** Regeneration feedback is identified by matching Lumiverse's injected `[OOC: ...]` shape because the interceptor context does not expose the feedback separately. User-authored content with the same shape may be classified as regeneration feedback.
+- **Automatic dry-run detection:** Lumiverse does not identify which extension requested a dry run. Prompt Viewer therefore tags likely chat-entry dry runs using timing, which can produce unusual false positives or false negatives.
+- **Swipe and deletion reconciliation:** Very unusual event ordering, rapid regenerations, or deletion before a snapshot is linked to a message can leave a capture labelled imperfectly or retained until history is cleared.
 
 ## Compatibility
 
-Prompt Viewer 1.0.7 requires Lumiverse 1.0.0 or newer.
+Prompt Viewer **1.0.8** requires Lumiverse **1.1.0 or newer**.
 
-This version was updated for the current Lumiverse/Spindle APIs, including multipart message content, native token counting, updated chat events, and autosaving extension settings.
+Version 1.0.8 supports the current Lumiverse staging interceptor context, including the runtime cancellation signal, authoritative dry-run classification, multipart message content, native token counting, final generation breakdown metadata, and updated chat lifecycle events.
 
 ## Changelog
 
