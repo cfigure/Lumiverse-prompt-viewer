@@ -145,17 +145,27 @@ export const PANEL_CSS = /* css */ `
     flex-shrink: 0;
   }
   .pv-block-copy {
-    background: none;
-    border: none;
-    padding: 0 2px;
+    appearance: none;
+    background: color-mix(in srgb, currentColor 9%, transparent);
+    border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+    border-radius: 5px;
+    padding: 3px 7px;
     margin: 0;
     cursor: pointer;
     color: inherit;
-    font-size: 12px;
-    line-height: 1;
-    opacity: 0.65;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.1;
+    opacity: 0.78;
+    min-width: 46px;
+    text-align: center;
   }
-  .pv-block-copy:hover { opacity: 1; }
+  .pv-block-copy:hover,
+  .pv-block-copy:focus-visible {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 15%, transparent);
+  }
   .pv-ooc-heading {
     display: flex;
     align-items: center;

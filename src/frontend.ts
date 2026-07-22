@@ -514,14 +514,25 @@ export function setup(ctx: SpindleFrontendContext) {
   // keeps the 1.0.7 collapse behavior intact everywhere except the button.
   function addHeaderCopy(parent: HTMLElement, getText: () => string): void {
     const btn = document.createElement('button')
+    let resetTimer: ReturnType<typeof setTimeout> | null = null
+
+    btn.type = 'button'
     btn.className = 'pv-block-copy'
-    btn.textContent = '⎘'
+    btn.textContent = 'Copy'
     btn.title = 'Copy this block'
+    btn.setAttribute('aria-label', 'Copy this block')
     btn.addEventListener('click', (e) => {
       e.stopPropagation()
       copyToClipboard(getText())
-      btn.textContent = '✓'
-      setTimeout(() => { btn.textContent = '⎘' }, 1200)
+      btn.textContent = 'Copied'
+      btn.setAttribute('aria-label', 'Copied')
+
+      if (resetTimer !== null) clearTimeout(resetTimer)
+      resetTimer = setTimeout(() => {
+        btn.textContent = 'Copy'
+        btn.setAttribute('aria-label', 'Copy this block')
+        resetTimer = null
+      }, 1500)
     })
     parent.appendChild(btn)
   }
