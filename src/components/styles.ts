@@ -105,8 +105,13 @@ export const PANEL_CSS = /* css */ `
     overflow-y: visible;
   }
 
-  /* The rejected message is nested inside the capped OOC container. Let the
-     parent own scrolling so expansion does not create two nested scrollbars. */
+  /* In compact mode the regeneration panel remains the sole 400px scroll
+     container. The expanded rejected message is always allowed to reach its
+     natural height, so there is never a scrollbar nested inside the panel. */
+  .pv-messages:not(.pv-full-height) .pv-ooc-block {
+    max-height: 400px;
+    overflow-y: auto;
+  }
   .pv-ooc-block .pv-rejected-block .pv-message-body {
     max-height: none;
     overflow-y: visible;

@@ -694,12 +694,11 @@ export function setup(ctx: SpindleFrontendContext) {
         const rejBody = document.createElement('div')
         rejBody.className = 'pv-message-body'
         rejBody.textContent = snap.rejectedMessage
-        // Starts collapsed — it duplicates a full prior message. Expanding it
-        // also releases the parent OOC banner's compact height constraint so
-        // the full rejected message is visible without a nested scrollbar.
-        makeCollapsible(rejHeader, rejBody, rejToggle, true, (collapsed) => {
-          oocBanner.classList.toggle('pv-ooc-expanded', !collapsed)
-        })
+        // Starts collapsed — it duplicates a full prior message. When opened,
+        // the rejected text itself is never height-capped. In compact mode the
+        // enclosing OOC panel remains the sole 400px scroll container, avoiding
+        // a scrollbar nested inside another scrollbar.
+        makeCollapsible(rejHeader, rejBody, rejToggle, true)
         rejWrapper.append(rejHeader, rejBody)
         oocBanner.appendChild(rejWrapper)
       }
