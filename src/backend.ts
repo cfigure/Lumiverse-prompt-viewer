@@ -23,6 +23,7 @@ interface Settings {
   maxHistoryPerChat: number
   showTokenizerSource: boolean
   hideInternalMarkers: boolean
+  renderedBreakdownStyle: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -34,6 +35,7 @@ const DEFAULT_SETTINGS: Settings = {
   maxHistoryPerChat: 50,
   showTokenizerSource: true,
   hideInternalMarkers: false,
+  renderedBreakdownStyle: false,
 }
 
 async function loadSettings(): Promise<Settings> {
@@ -203,9 +205,16 @@ function buildDetection(m: RegExpExecArray, position: 'system' | 'user'): RegenF
 function detectRegenFeedback(messages: LlmMessage[]): RegenFeedbackDetection | null {
   if (!messages.length) return null
 
-  // Walk backwards from the end. The assembler injects at the tail in both
-  // positions, and on regen/swipe paths nothing further mutates the tail
-  // before the interceptor runs.
+  // Staging's interceptor bridge stamps `__isChatHistory` onto real chat
+  // turns — the same identity marker the assembler's regen-feedback injector
+  // uses to pick its target message. When flags are present anywhere in the
+  // array, use them: block-based assembly appends preset user/system blocks
+  // (turn-format blocks, group nudge, sendIfEmpty, empty-send nudge) AFTER
+  // the injection point, so the marker-bearing message is no longer the last
+  // user message. When no flags exist (older hosts), fall back to the 1.0.7
+  // walk, which stops at the first trailing user message without a marker.
+  const hasHistoryFlags = messages.some((m) => (m as unknown as Record<string, unknown>).__isChatHistory === true)
+
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     const candidates = messageTextCandidates(msg.content)
@@ -218,7 +227,8 @@ function detectRegenFeedback(messages: LlmMessage[]): RegenFeedbackDetection | n
       }
       // A system message that ISN'T a pure OOC marker is fine — keep walking.
       // The assembler can leave other system messages at the tail (e.g.
-      // depth-injected blocks), so non-match here is not a stop condition.
+      // depth-injected blocks, continue nudge), so non-match here is not a
+      // stop condition.
       continue
     }
 
@@ -227,10 +237,19 @@ function detectRegenFeedback(messages: LlmMessage[]): RegenFeedbackDetection | n
         const m = TRAILING_USER_OOC_RE.exec(content) || SYSTEM_OOC_RE.exec(content)
         if (m) return buildDetection(m, 'user')
       }
-      // Tail user message without the marker: feedback wasn't injected
-      // in 'user' position. Stop — looking further back would risk picking
-      // up older OOC text from earlier turns.
-      return null
+      if (!hasHistoryFlags) {
+        // Legacy hosts: tail user message without the marker — feedback
+        // wasn't injected in 'user' position. Stop; looking further back
+        // would risk picking up older OOC text from earlier turns.
+        return null
+      }
+      if ((msg as unknown as Record<string, unknown>).__isChatHistory === true) {
+        // The real latest chat turn, and it carries no marker: no feedback.
+        return null
+      }
+      // Unflagged user message = preset block / nudge appended after the
+      // injection point — keep walking toward the actual chat history.
+      continue
     }
 
     // assistant or other roles — skip and keep looking
