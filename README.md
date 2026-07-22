@@ -8,7 +8,7 @@ It is intended for inspecting prompt order, resolved message content, World Info
 
 - **Real prompt capture** — Records the message array from Lumiverse's interceptor pipeline rather than reconstructing it from the chat.
 - **Three views** — Inspect a prompt as formatted blocks, JSON, or rendered plain text.
-- **Expandable prompt blocks** — Message blocks grow with their content and can be collapsed individually or together.
+- **Configurable block heights** — Expanded sections are capped at 400px by default for compact navigation, or can grow to their full content height through settings.
 - **Per-block copying** — Copy any message, OOC feedback block, or rejected-message block. The button confirms with `✓ Copied`.
 - **Prompt-wide copying** — Copies the current view, so JSON and Rendered exports match what is shown on screen.
 - **Generation metadata** — Shows generation type, chat, connection, persona, model, provider, preset, context size, usage, and resolved parameters when available.
@@ -52,9 +52,9 @@ The toolbar provides:
 
 The default view presents generation metadata, optional OOC feedback, activated World Info, and each prompt message as a separate role-coloured block.
 
-Click a message header to collapse or expand it. Expanded blocks grow to fit their content instead of creating a fixed-height inner scroll area.
+Click a message header to collapse or expand it. By default, expanded prompt messages, generation metadata, activated World Info, and regeneration feedback grow up to 400px and then scroll within their section. Enable **Expand prompt blocks to full height** to remove these caps and display the complete contents.
 
-When regeneration feedback includes a rejected message, that rejected message starts collapsed. Expanding it also expands the enclosing OOC panel so the complete text is visible.
+When regeneration feedback includes a rejected message, that rejected message starts collapsed. Expanding it reveals the complete rejected message without creating a second nested scrollbar. With full-height expansion disabled, the enclosing regeneration feedback panel remains capped at 400px and provides the scrolling area. With full-height expansion enabled, the entire regeneration feedback panel grows to fit its contents.
 
 ### JSON view
 
@@ -86,9 +86,10 @@ Settings are available from **Settings → Extensions → Prompt Viewer** or the
 | Dry run display | Dry runs only | Show only dry runs while the dry-run toggle is active, or show them alongside normal prompts |
 | Show World Info entries | On | Display the individual activated World Info entries |
 | Show Regen Feedback at top | On | Display extracted OOC regeneration feedback above the prompt messages |
+| Expand prompt blocks to full height | Off | Remove the 400px height cap from prompt messages, generation metadata, World Info, and regeneration feedback |
 | Show tokenizer source | On | Label native, Lumiverse-estimated, and fallback token counts |
 | Hide Lumiverse markers in JSON | Off | Hide internal assembly keys from JSON display and JSON copy only |
-| Hide automatic chat-entry dry runs | On | Hide dry runs inferred to have been triggered automatically shortly after entering a chat |
+| Hide automatic chat-entry dry runs | Off | Hide dry runs inferred to have been triggered automatically shortly after entering a chat |
 | Prompt Breakdown-style Rendered | Off | Format Rendered view with headings, role separators, and a parameters tail |
 | Max prompts per chat | 50 | Retain 5–500 captures per chat; larger histories use more memory |
 
