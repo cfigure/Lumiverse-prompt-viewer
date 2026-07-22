@@ -654,6 +654,10 @@ export function setup(ctx: SpindleFrontendContext) {
     messagesEl.appendChild(ctxBlock)
 
     if ((snap.regenFeedback || snap.rejectedMessage) && settings.showRegenFeedback) {
+    if (
+      (snap.regenFeedback || snap.regenFeedbackRaw || snap.rejectedMessage !== undefined)
+      && settings.showRegenFeedback
+    ) {  
       const oocBanner = document.createElement('div')
       oocBanner.className = 'pv-context-block pv-ooc-block'
       const heading = document.createElement('div')
@@ -664,14 +668,18 @@ export function setup(ctx: SpindleFrontendContext) {
       addHeaderCopy(heading, () => snap.regenFeedbackRaw ?? `[OOC: ${snap.regenFeedback ?? ''}]`)
       const body = document.createElement('div')
       body.className = 'pv-ooc-body'
-      // When the rejected-message wrapper was detected, the banner shows only
-      // the user's actual feedback; the (potentially huge) rejected message
-      // lives in its own collapsible block below. Plain OOCs keep the 1.0.7
-      // raw-marker display.
-      body.textContent = snap.rejectedMessage !== undefined
-        ? (snap.regenFeedback || '(no feedback text)')
-        : (snap.regenFeedbackRaw ?? `[OOC: ${snap.regenFeedback}]`)
-      oocBanner.append(heading, body)
+      // Formatted view shows readable feedback text.
+      // Some swipe paths only retain the raw OOC marker, so use that as a fallback.
+      const rawFeedbackMatch = snap.regenFeedbackRaw?.match(
+        /^\[OOC:\s*([\s\S]*?)\]\s*$/,
+      )
+
+      const readableFeedback =
+        snap.regenFeedback?.trim()
+       || rawFeedbackMatch?.[1]?.trim()
+       || '(no feedback text)'
+
+      body.textContent = readableFeedback
 
       if (snap.rejectedMessage !== undefined) {
         const rejWrapper = document.createElement('div')
