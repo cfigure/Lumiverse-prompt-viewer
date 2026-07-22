@@ -309,7 +309,7 @@ function createSettingsUI(
     ], (value) => commit({ defaultViewMode: value }, status)))
 
     addRow('Show Dry Runs by default', mountSwitch(local.showDryRunsByDefault, 'Show Dry Runs by default', (checked) => commit({ showDryRunsByDefault: checked }, status)))
-    addRow('Dry Run display', mountSelect(local.dryRunMode, [
+    addRow('Dry Runs display', mountSelect(local.dryRunMode, [
       { value: 'only', label: 'Dry Runs only' },
       { value: 'alongside', label: 'Alongside normal prompts' },
     ], (value) => commit({ dryRunMode: value }, status)))
