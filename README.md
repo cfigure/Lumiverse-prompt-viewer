@@ -16,7 +16,7 @@ It is intended for inspecting prompt order, resolved message content, World Info
 - **World Info inspection** — Lists activated entries, source types, keywords, and vector scores.
 - **Regeneration feedback** — Separates injected OOC feedback from the prompt and can expose an included rejected message in its own expandable block.
 - **Swipe and abort tracking** — Distinguishes swipes from ordinary regenerations and marks stopped generations.
-- **Dry-run handling** — Keeps dry runs separate from normal captures and can hide likely automatic chat-entry dry runs.
+- **Dry-Run handling** — Keeps Dry Runs separate from normal captures and can hide likely automatic chat-entry Dry Runs.
 - **Per-chat history** — Maintains an in-memory prompt history for each chat and refreshes it when chats change.
 - **Message linking** — Links captures to the chat message and swipe they produced when Lumiverse supplies that information.
 
@@ -32,7 +32,7 @@ Approve the requested permissions when prompted. If the extension panel does not
 
 ## Using Prompt Viewer
 
-Open the **Prompt Viewer** extension tab after sending a message or running a dry run. The history selector shows captures for the current chat, newest first.
+Open the **Prompt Viewer** extension tab after sending a message or running a Dry Run. The history selector shows captures for the current chat, newest first.
 
 The toolbar provides:
 
@@ -82,14 +82,14 @@ Settings are available from **Settings → Extensions → Prompt Viewer** or the
 | Setting | Default | Description |
 |---|---:|---|
 | Default view mode | Formatted | Choose Formatted, JSON, or Rendered as the initial view |
-| Show dry runs by default | Off | Open the viewer with dry-run captures enabled |
-| Dry run display | Dry runs only | Show only dry runs while the dry-run toggle is active, or show them alongside normal prompts |
+| Show Dry Runs by default | Off | Open the viewer with dry-run captures enabled |
+| Dry Run display | Dry Runs only | Show only Dry Runs while the dry-run toggle is active, or show them alongside normal prompts |
 | Show World Info entries | On | Display the individual activated World Info entries |
 | Show Regen Feedback at top | On | Display extracted OOC regeneration feedback above the prompt messages |
 | Expand prompt blocks to full height | Off | Remove the 400px height cap from prompt messages, generation metadata, World Info, and regeneration feedback |
 | Show tokenizer source | On | Label native, Lumiverse-estimated, and fallback token counts |
 | Hide Lumiverse markers in JSON | Off | Hide internal assembly keys from JSON display and JSON copy only |
-| Hide automatic chat-entry dry runs | Off | Hide dry runs inferred to have been triggered automatically shortly after entering a chat |
+| Hide automatic chat-entry Dry runs | Off | Hide Dry runs inferred to have been triggered automatically shortly after entering a chat |
 | Format Rendered like Prompt Breakdown | Off | Adds Prompt Breakdown-style headings, role labels, and parameters |
 | Max prompts per chat | 50 | Retain 5–500 captures per chat; larger histories use more memory |
 
@@ -103,7 +103,7 @@ Consequences:
 
 - The prompt messages can appear before the generation finishes.
 - Final parameters and usage may be added to that capture later.
-- Dry runs do not emit the completed-generation breakdown event, so they may not include final parameters, preset, or usage.
+- Dry Runs do not emit the completed-generation breakdown event, so they may not include final parameters, preset, or usage.
 - A stopped or failed generation may also lack some late breakdown fields.
 
 This is an API timing limitation rather than a limitation in when Lumiverse itself knows the sampler settings.
@@ -132,7 +132,7 @@ Prompt Viewer does not modify the prompt returned to Lumiverse. It clones the se
 - **Internal JSON markers:** Lumiverse may attach bookkeeping keys such as `_fromSystem`, `__isChatHistory`, `sourceMessageId`, and `sourceIndexInChat` to in-memory message objects. Providers rebuild their request from supported message fields; these markers are not prompt text. They can be hidden with the JSON marker setting.
 - **Token counts:** Counts are exact only when Lumiverse has an appropriate tokenizer for the active model. Otherwise Lumiverse or Prompt Viewer may provide an estimate.
 - **OOC detection:** Regeneration feedback is identified by matching Lumiverse's injected `[OOC: ...]` shape because the interceptor context does not expose the feedback separately. User-authored content with the same shape may be classified as regeneration feedback.
-- **Automatic dry-run detection:** Lumiverse does not identify which extension requested a dry run. Prompt Viewer therefore tags likely chat-entry dry runs using timing, which can produce unusual false positives or false negatives.
+- **Automatic dry-run detection:** Lumiverse does not identify which extension requested a Dry Run. Prompt Viewer therefore tags likely chat-entry Rry Runs using timing, which can produce unusual false positives or false negatives.
 - **Swipe and deletion reconciliation:** Very unusual event ordering, rapid regenerations, or deletion before a snapshot is linked to a message can leave a capture labelled imperfectly or retained until history is cleared.
 
 ## Compatibility
