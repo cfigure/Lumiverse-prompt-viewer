@@ -524,7 +524,7 @@ export function setup(ctx: SpindleFrontendContext) {
     btn.addEventListener('click', (e) => {
       e.stopPropagation()
       copyToClipboard(getText())
-      btn.textContent = 'Copied'
+      btn.textContent = '✓ Copied'
       btn.setAttribute('aria-label', 'Copied')
 
       if (resetTimer !== null) clearTimeout(resetTimer)
