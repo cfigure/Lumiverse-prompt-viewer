@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { PromptStore } from './storage/prompt-store'
-import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource } from './storage/prompt-store'
+import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource, AutoDryRunReason } from './storage/prompt-store'
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
@@ -491,9 +491,10 @@ function tryRegisterInterceptor(): void {
             : getActiveGenerationForChat(ctxSnapshot.chatId)
           snapshot.isDryRun = contextDryRun ?? !active
           if (snapshot.isDryRun && typeof ctxSnapshot.chatId === 'string') {
-            const switchedAt = lastChatSwitchAt.get(ctxSnapshot.chatId)
-            if (switchedAt !== undefined && Date.now() - switchedAt < AUTO_DRY_RUN_WINDOW_MS) {
+            const reason = consumeAutoDryRunReason(ctxSnapshot.chatId, Date.now())
+            if (reason) {
               snapshot.isAutoDryRun = true
+              snapshot.autoDryRunReason = reason
             }
           }
           if (active) {
@@ -670,13 +671,38 @@ spindle.permissions.onChanged(({ permission, granted }) => {
 // ---------------------------------------------------------------------------
 // Chat tracking (free tier — no permission needed)
 // ---------------------------------------------------------------------------
-// Timestamp of the most recent CHAT_SWITCHED per chat, for the auto-dry-run
-// heuristic: a dry run captured this soon after entering a chat, with no user
-// action, is almost certainly another extension's chat-open probe (e.g. a
-// spindle.generate.dryRun call to precompute stats). The host provides no
-// requester identity, so timing inference is the best available signal.
+// Automatic Dry Run heuristics. Lumiverse does not expose which extension
+// requested a Dry Run, so Prompt Viewer can only infer likely background probes
+// from nearby host lifecycle events.
 const AUTO_DRY_RUN_WINDOW_MS = 4000
+const REGEN_MUTATION_DRY_RUN_WINDOW_MS = 10_000
 const lastChatSwitchAt = new Map<string, number>()
+const pendingRegenMutationDryRun = new Map<string, number>()
+
+function prunePendingRegenMutationDryRuns(now = Date.now()): void {
+  for (const [chatId, timestamp] of pendingRegenMutationDryRun) {
+    if (now - timestamp >= REGEN_MUTATION_DRY_RUN_WINDOW_MS) {
+      pendingRegenMutationDryRun.delete(chatId)
+    }
+  }
+}
+
+function consumeAutoDryRunReason(chatId: string, now: number): AutoDryRunReason | undefined {
+  const mutationAt = pendingRegenMutationDryRun.get(chatId)
+  if (mutationAt !== undefined) {
+    pendingRegenMutationDryRun.delete(chatId)
+    if (now - mutationAt < REGEN_MUTATION_DRY_RUN_WINDOW_MS) {
+      return 'regen-mutation'
+    }
+  }
+
+  const switchedAt = lastChatSwitchAt.get(chatId)
+  if (switchedAt !== undefined && now - switchedAt < AUTO_DRY_RUN_WINDOW_MS) {
+    return 'chat-entry'
+  }
+
+  return undefined
+}
 
 spindle.on('CHAT_SWITCHED', (payload: any) => {
   const chatId = payload.chatId ?? null
@@ -700,6 +726,18 @@ spindle.on('MESSAGE_SWIPED', (payload: any) => {
   if (payload.action !== 'added') return
   const chatId = payload.chatId
   if (!chatId) return
+
+  // Lumiverse stages regenerate/swipe generations by adding a blank swipe
+  // before prompt assembly. Some extensions react to that mutation by issuing
+  // their own Dry Run. Record a one-shot marker so only the next Dry Run for
+  // this chat can be tagged as automatic.
+  const addedSwipe = Array.isArray(payload.message?.swipes)
+    ? payload.message.swipes[payload.swipeId]
+    : undefined
+  if (addedSwipe === '' || payload.message?.content === '') {
+    prunePendingRegenMutationDryRuns()
+    pendingRegenMutationDryRun.set(chatId, Date.now())
+  }
 
   prunePendingSwipes()
   const messageId = payload.message?.id

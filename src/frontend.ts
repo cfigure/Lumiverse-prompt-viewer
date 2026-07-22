@@ -31,6 +31,7 @@ interface PromptSnapshot {
   messageNumber?: number
   isDryRun?: boolean
   isAutoDryRun?: boolean
+  autoDryRunReason?: 'chat-entry' | 'regen-mutation'
   model?: string
   regenFeedback?: string
   regenFeedbackRaw?: string
@@ -317,7 +318,7 @@ function createSettingsUI(
     addRow('Show Regen Feedback at top', mountSwitch(local.showRegenFeedback, 'Show Regen Feedback at top', (checked) => commit({ showRegenFeedback: checked }, status)))
     addRow('Show tokenizer source', mountSwitch(local.showTokenizerSource, 'Show tokenizer source', (checked) => commit({ showTokenizerSource: checked }, status)))
     addRow('Hide Lumiverse markers in JSON', mountSwitch(local.hideInternalMarkers, 'Hide Lumiverse markers in JSON', (checked) => commit({ hideInternalMarkers: checked }, status)), 'Hides Lumiverse bookkeeping keys from JSON view and copy.')
-    addRow('Hide automatic chat-entry Dry Runs', mountSwitch(local.hideAutoDryRuns, 'Hide automatic chat-entry Dry Runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Hides likely chat-entry Dry Runs.')
+    addRow('Hide automatic Dry Runs', mountSwitch(local.hideAutoDryRuns, 'Hide automatic Dry Runs', (checked) => commit({ hideAutoDryRuns: checked }, status)), 'Hides likely chat-entry and regeneration-triggered Dry Runs.')
     addRow('Format Rendered like Prompt Breakdown', mountSwitch(local.renderedBreakdownStyle, 'Format Rendered like Prompt Breakdown', (checked) => commit({ renderedBreakdownStyle: checked }, status)), 'Adds Prompt Breakdown-style headings, role labels, and parameters.')
     addRow('Expand prompt blocks to full height', mountSwitch(local.expandPromptBlocks, 'Expand prompt blocks to full height', (checked) => commit({ expandPromptBlocks: checked }, status)), 'Lets formatted sections grow beyond the default 400px cap.')
     addRow('Max prompts per chat', mountStepper(local.maxHistoryPerChat, (value) => commit({ maxHistoryPerChat: value }, status)), 'Higher values use more memory. Prompt data is not persisted — history clears on restart.')
