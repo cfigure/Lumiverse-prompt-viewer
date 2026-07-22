@@ -77,7 +77,7 @@ Rendered view displays the prompt as plain text. With **Format Rendered like Pro
 
 ## Settings
 
-Settings are available from **Settings → Extensions → Prompt Viewer** or the **⚙** button in the Prompt Viewer toolbar. Changes are saved automatically.
+Settings are available from **Settings → Extensions → Prompt Viewer** or the **⚙** button in the Prompt Viewer toolbar. The toolbar button opens the Settings panel directly at Prompt Viewer. Changes are saved automatically.
 
 | Setting | Default | Description |
 |---|---:|---|

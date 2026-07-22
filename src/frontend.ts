@@ -933,7 +933,11 @@ export function setup(ctx: SpindleFrontendContext) {
   refreshBtn.addEventListener('click', () => ctx.sendToBackend(backendPayload({ type: 'get_history' })))
 
   settingsBtn.addEventListener('click', () => {
-    ctx.events.emit('open-settings', { view: 'extensions' })
+    const extensionId = settingsMount.getAttribute('data-spindle-extension-root')
+    ctx.events.emit('open-settings', {
+      view: 'extensions',
+      ...(extensionId ? { extensionId } : {}),
+    })
   })
 
   copyBtn.addEventListener('click', () => {
