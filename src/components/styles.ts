@@ -290,71 +290,91 @@ export const PANEL_CSS = /* css */ `
   .pv-settings {
     padding: 0;
   }
+
   .pv-settings-title {
-    font-size: 15px;
+    padding: 12px 16px 8px;
+    font-size: calc(15px * var(--lumiverse-font-scale, 1));
     font-weight: 600;
     color: var(--lumiverse-text);
-    padding: 12px 16px 8px;
   }
+
   .pv-settings-card {
     padding: 8px 16px 16px;
   }
+
   .pv-settings-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    display: flex;
     align-items: center;
-    column-gap: 20px;
+    justify-content: space-between;
+    gap: 12px;
     min-height: 44px;
     padding: 10px 0;
     border-bottom: 1px solid var(--lumiverse-border);
   }
+
   .pv-settings-row:last-of-type {
     border-bottom: none;
   }
+
   .pv-settings-label-block {
+    flex: 1 1 auto;
     min-width: 0;
-    padding-right: 12px;
   }
+
   .pv-settings-label {
     display: block;
-    font-size: 13px;
+    font-size: calc(13px * var(--lumiverse-font-scale, 1));
     color: var(--lumiverse-text);
   }
+
   .pv-settings-control {
     display: flex;
-    justify-content: flex-end;
     align-items: center;
-    min-width: 160px;
-    max-width: 240px;
+    justify-content: flex-end;
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: min(240px, 48%);
   }
+
   .pv-shared-slot {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
-    min-width: 160px;
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: 100%;
   }
+
   .pv-settings-hint,
   .pv-settings-status {
-    font-size: 11px;
-    color: var(--lumiverse-text-dim);
     margin-top: 4px;
+    font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
+    line-height: 1.45;
+    color: var(--lumiverse-text-dim);
   }
+
   .pv-settings-status {
-    padding-top: 8px;
     min-height: 14px;
+    padding-top: 8px;
   }
+
   .pv-settings-input {
-    background: var(--lumiverse-fill);
-    color: var(--lumiverse-text);
+    max-width: 100%;
+    min-width: 100px;
+    padding: 4px 8px;
     border: 1px solid var(--lumiverse-border);
     border-radius: var(--lumiverse-radius);
-    padding: 4px 8px;
-    font-size: 12px;
-    min-width: 100px;
+    background: var(--lumiverse-fill);
+    color: var(--lumiverse-text);
+    font-family: inherit;
+    font-size: calc(12px * var(--lumiverse-font-scale, 1));
   }
+
   .pv-settings-note {
-    font-size: 11px;
-    color: var(--lumiverse-text-dim);
     padding: 10px 0 6px;
+    font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
+    line-height: 1.45;
+    color: var(--lumiverse-text-dim);
     font-style: italic;
   }
 `
