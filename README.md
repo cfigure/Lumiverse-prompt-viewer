@@ -137,13 +137,19 @@ Prompt Viewer does not modify the prompt returned to Lumiverse. It clones the se
 
 ## Compatibility
 
-Prompt Viewer **1.0.8** requires Lumiverse **1.1.0 or newer**.
+Prompt Viewer **1.0.9** requires Lumiverse **1.2.4 or newer**. The interceptor must supply a user ID so captures can be kept separate on operator-scoped installations.
 
-Version 1.0.8 supports the current Lumiverse staging interceptor context, including the runtime cancellation signal, authoritative dry-run classification, multipart message content, native token counting, final generation breakdown metadata, and updated chat lifecycle events.
+Version 1.0.9 supports the current Lumiverse staging interceptor context, including the runtime cancellation signal, authoritative dry-run classification, multipart message content, native token counting, final generation breakdown metadata, and updated chat lifecycle events.
 
 ## Changelog
 
-See [Releases](https://github.com/cfigure/Lumiverse-prompt-viewer/releases) for version history.
+### 1.0.9
+
+- Keep prompt history, settings, lifecycle state, and frontend updates separate for each user in operator-scoped installations.
+- Link completed messages only to their matching live capture; a missing capture can no longer claim a nearby Dry Run.
+- Associate added swipes with the upcoming generation without relabelling an older prompt capture.
+
+See [Releases](https://github.com/cfigure/Lumiverse-prompt-viewer/releases) for earlier versions.
 
 ## License
 

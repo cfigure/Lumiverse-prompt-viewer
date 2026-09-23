@@ -179,28 +179,33 @@ export class PromptStore {
     return null
   }
 
-  linkMessage(chatId: string, messageId: string, messageNumber?: number, generationId?: string, swipeIndex?: number): void {
+  linkMessage(chatId: string, messageId: string, messageNumber?: number, generationId?: string, swipeIndex?: number): PromptSnapshot | null {
     const arr = this.getChat(chatId)
     if (generationId) {
       for (let i = arr.length - 1; i >= 0; i--) {
         if (arr[i].generationId === generationId) {
           arr[i].messageId = messageId
           if (messageNumber !== undefined) arr[i].messageNumber = messageNumber
-          if (swipeIndex !== undefined && arr[i].isSwipe) arr[i].swipeIndex = swipeIndex
+          // GENERATION_STARTED names the generated slot. The currently displayed
+          // swipe may have changed by the time the message is fetched on end.
+          if (swipeIndex !== undefined && arr[i].isSwipe && arr[i].swipeIndex === undefined) arr[i].swipeIndex = swipeIndex
           this.replaceSnapshot(arr[i])
-          return
+          return arr[i]
         }
       }
+      // A missing live capture must never claim an unrelated dry run.
+      return null
     }
     for (let i = arr.length - 1; i >= 0; i--) {
-      if (!arr[i].messageId) {
+      if (!arr[i].isDryRun && !arr[i].messageId) {
         arr[i].messageId = messageId
         if (messageNumber !== undefined) arr[i].messageNumber = messageNumber
-        if (swipeIndex !== undefined && arr[i].isSwipe) arr[i].swipeIndex = swipeIndex
+        if (swipeIndex !== undefined && arr[i].isSwipe && arr[i].swipeIndex === undefined) arr[i].swipeIndex = swipeIndex
         this.replaceSnapshot(arr[i])
-        return
+        return arr[i]
       }
     }
+    return null
   }
 
   deleteByMessageId(messageId: string): number {
@@ -224,31 +229,6 @@ export class PromptStore {
     }
     this.all = this.all.filter((s) => s.context.chatId !== chatId)
     this.chats.set(chatId, [])
-  }
-
-  /** Tag a snapshot as a swipe by messageId, falling back to most recent regen */
-  tagAsSwipe(chatId: string, messageId?: string, swipeIndex?: number): PromptSnapshot | null {
-    const arr = this.getChat(chatId)
-    if (messageId) {
-      for (let i = arr.length - 1; i >= 0; i--) {
-        if (arr[i].messageId === messageId) {
-          arr[i].isSwipe = true
-          if (swipeIndex !== undefined) arr[i].swipeIndex = swipeIndex
-          this.replaceSnapshot(arr[i])
-          return arr[i]
-        }
-      }
-    }
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const snap = arr[i]
-      if (!snap.isSwipe && (snap.context.generationType === 'regenerate' || snap.context.generationType === 'swipe')) {
-        snap.isSwipe = true
-        if (swipeIndex !== undefined) snap.swipeIndex = swipeIndex
-        this.replaceSnapshot(snap)
-        return snap
-      }
-    }
-    return null
   }
 
   /** Mark a snapshot as aborted by generationId */

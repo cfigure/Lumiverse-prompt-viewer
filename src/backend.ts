@@ -7,9 +7,38 @@ import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource, Aut
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
-const store = new PromptStore()
-let activeChatId: string | null = null
-let currentUserId: string | undefined
+interface UserState {
+  store: PromptStore
+  activeChatId: string | null
+  activeGenerations: Map<string, ActiveGenerationMeta>
+  pendingSwipeAdds: Map<string, { swipeIndex?: number; timestamp: number }>
+  pendingAutoDryRunEvidence: Map<string, PendingAutoDryRunEvidence>
+  connectionInfoCache: Map<string, { provider?: string; model?: string }>
+}
+
+const userStates = new Map<string, UserState>()
+
+function stateFor(userId: string): UserState {
+  let state = userStates.get(userId)
+  if (!state) {
+    state = {
+      store: new PromptStore(),
+      activeChatId: null,
+      activeGenerations: new Map(),
+      pendingSwipeAdds: new Map(),
+      pendingAutoDryRunEvidence: new Map(),
+      connectionInfoCache: new Map(),
+    }
+    userStates.set(userId, state)
+  }
+  return state
+}
+
+function sendToUser(userId: string, payload: unknown, frontendSessionId?: string): void {
+  // Staging supports session-scoped delivery; the published types only declare
+  // the two-argument form so use the host's runtime signature here.
+  (spindle as any).sendToFrontend(payload, userId, frontendSessionId ? { frontendSessionId } : undefined)
+}
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -42,26 +71,26 @@ const DEFAULT_SETTINGS: Settings = {
   expandPromptBlocks: false,
 }
 
-async function loadSettings(): Promise<Settings> {
+async function loadSettings(userId: string): Promise<Settings> {
   try {
     const saved = await spindle.userStorage.getJson<Partial<Settings>>('settings.json', {
       fallback: {},
-      userId: currentUserId,
+      userId,
     })
     const settings = { ...DEFAULT_SETTINGS, ...saved }
-    store.setMaxPerChat(settings.maxHistoryPerChat)
+    stateFor(userId).store.setMaxPerChat(settings.maxHistoryPerChat)
     return settings
   } catch {
     return { ...DEFAULT_SETTINGS }
   }
 }
 
-async function saveSettings(settings: Settings): Promise<void> {
+async function saveSettings(settings: Settings, userId: string): Promise<void> {
   await spindle.userStorage.setJson('settings.json', settings, {
     indent: 2,
-    userId: currentUserId,
+    userId,
   })
-  store.setMaxPerChat(settings.maxHistoryPerChat)
+  stateFor(userId).store.setMaxPerChat(settings.maxHistoryPerChat)
 }
 
 // ---------------------------------------------------------------------------
@@ -325,14 +354,13 @@ async function countTokens(
 // is gated behind the `generation` permission, which the manifest declares.
 // Typed loosely because lumiverse-spindle-types may predate the API.
 // ---------------------------------------------------------------------------
-const connectionInfoCache = new Map<string, { provider?: string; model?: string }>()
-
 async function resolveConnectionInfo(
   connectionId: unknown,
-  userId?: string,
+  userId: string,
 ): Promise<{ provider?: string; model?: string } | null> {
   if (typeof connectionId !== 'string' || !connectionId) return null
-  const cached = connectionInfoCache.get(connectionId)
+  const cache = stateFor(userId).connectionInfoCache
+  const cached = cache.get(connectionId)
   if (cached) return cached
   try {
     const api = (spindle as any).connections
@@ -342,8 +370,8 @@ async function resolveConnectionInfo(
       provider: typeof conn?.provider === 'string' && conn.provider ? conn.provider : undefined,
       model: typeof conn?.model === 'string' && conn.model ? conn.model : undefined,
     }
-    if (connectionInfoCache.size > 50) connectionInfoCache.clear()
-    connectionInfoCache.set(connectionId, info)
+    if (cache.size > 50) cache.clear()
+    cache.set(connectionId, info)
     return info
   } catch {
     return null
@@ -358,36 +386,34 @@ interface ActiveGenerationMeta {
   model?: string
   generationType?: string
   targetMessageId?: string
+  targetSwipeId?: number
 }
-
-const activeGenerations = new Map<string, ActiveGenerationMeta>()
-const pendingSwipeAdds = new Map<string, { swipeIndex?: number; timestamp: number }>()
 
 function swipeKey(chatId?: string, messageId?: string): string | null {
   return chatId && messageId ? `${chatId}:${messageId}` : null
 }
 
-function getActiveGenerationForChat(chatId?: string): { generationId: string; meta: ActiveGenerationMeta } | null {
+function getActiveGenerationForChat(state: UserState, chatId?: string): { generationId: string; meta: ActiveGenerationMeta } | null {
   // When the interceptor identifies its chat, require an exact match. Falling
   // back to an unrelated sole active generation can misclassify a dry run in
   // another chat as live and attach the wrong generation metadata.
   if (chatId) {
-    for (const [generationId, meta] of activeGenerations) {
-      if (meta.chatId === chatId) return { generationId, meta }
-    }
-    return null
+    const matches = [...state.activeGenerations].filter(([, meta]) => meta.chatId === chatId)
+    // The interceptor context has no generationId. Never guess between two
+    // concurrent live generations in the same chat.
+    return matches.length === 1 ? { generationId: matches[0][0], meta: matches[0][1] } : null
   }
 
   // Older hosts or unusual system prompts may omit chatId. Preserve the
   // previous single-generation fallback only for that genuinely ambiguous case.
-  if (activeGenerations.size !== 1) return null
-  const [generationId, meta] = activeGenerations.entries().next().value as [string, ActiveGenerationMeta]
+  if (state.activeGenerations.size !== 1) return null
+  const [generationId, meta] = state.activeGenerations.entries().next().value as [string, ActiveGenerationMeta]
   return { generationId, meta }
 }
 
-function prunePendingSwipes(now = Date.now()): void {
-  for (const [key, value] of pendingSwipeAdds) {
-    if (now - value.timestamp > 5 * 60 * 1000) pendingSwipeAdds.delete(key)
+function prunePendingSwipes(state: UserState, now = Date.now()): void {
+  for (const [key, value] of state.pendingSwipeAdds) {
+    if (now - value.timestamp > 5 * 60 * 1000) state.pendingSwipeAdds.delete(key)
   }
 }
 
@@ -436,7 +462,7 @@ function tryRegisterInterceptor(): void {
 
   spindle.registerInterceptor(async (messages, context) => {
     try {
-      const ctx = context as InterceptorMeta
+      const ctx = context as unknown as InterceptorMeta
 
       // Lumiverse staging attaches a per-run AbortSignal to the interceptor
       // context (for intercept_abort support). AbortSignal is not
@@ -452,15 +478,15 @@ function tryRegisterInterceptor(): void {
       const capturedMessages = structuredClone(messages) as LlmMessage[]
       const ctxSnapshot = cloneSafe(cloneableCtx) as InterceptorMeta
 
-      // Operator-scoped installs require an explicit userId on spindle.tokens
-      // calls; the interceptor context carries the generation's user. Prefer
-      // it over the frontend-derived global (which may be unset before the
-      // panel is first opened, or belong to a different user on multi-user
-      // operator instances), and keep the global fresh for other call sites.
+      // Never place an unidentified capture in a shared operator worker.
       const ctxUserId = typeof ctxSnapshot.userId === 'string' && ctxSnapshot.userId
         ? ctxSnapshot.userId
         : undefined
-      if (ctxUserId) currentUserId = ctxUserId
+      if (!ctxUserId) {
+        spindle.log.warn('Prompt Viewer skipped a capture without a userId in interceptor context.')
+        return messages
+      }
+      const state = stateFor(ctxUserId)
 
       // queueMicrotask (NOT setTimeout): microtasks drain before the worker
       // can process any subsequent host postMessage, so activeGenerations and
@@ -488,10 +514,10 @@ function tryRegisterInterceptor(): void {
             : undefined
           const active = contextDryRun === true
             ? null
-            : getActiveGenerationForChat(ctxSnapshot.chatId)
+            : getActiveGenerationForChat(state, ctxSnapshot.chatId)
           snapshot.isDryRun = contextDryRun ?? !active
           if (snapshot.isDryRun && typeof ctxSnapshot.chatId === 'string') {
-            const evidence = consumeAutoDryRunEvidence(ctxSnapshot.chatId, Date.now())
+            const evidence = consumeAutoDryRunEvidence(state, ctxSnapshot.chatId, Date.now())
             if (evidence) {
               snapshot.isLikelyAutoDryRun = true
               snapshot.autoDryRunEvidence = evidence
@@ -502,15 +528,16 @@ function tryRegisterInterceptor(): void {
             if (active.meta.model) snapshot.model = active.meta.model
 
             const key = swipeKey(ctxSnapshot.chatId, active.meta.targetMessageId)
-            const pendingSwipe = key ? pendingSwipeAdds.get(key) : null
-            if (pendingSwipe || active.meta.generationType === 'swipe') {
+            const pendingSwipe = key ? state.pendingSwipeAdds.get(key) : null
+            if ((pendingSwipe && (active.meta.targetSwipeId === undefined || pendingSwipe.swipeIndex === active.meta.targetSwipeId))
+              || active.meta.generationType === 'swipe') {
               snapshot.isSwipe = true
-              if (pendingSwipe?.swipeIndex !== undefined) snapshot.swipeIndex = pendingSwipe.swipeIndex
+              snapshot.swipeIndex = active.meta.targetSwipeId ?? pendingSwipe?.swipeIndex
             }
           }
 
           // Async token count — fire and forget, update snapshot when ready
-          countTokens(capturedMessages, snapshot.model, ctxUserId ?? currentUserId).then((result) => {
+          countTokens(capturedMessages, snapshot.model, ctxUserId).then((result) => {
             snapshot.estimatedTokens = result.tokens
             snapshot.approximateTokens = result.approximate
             snapshot.tokenCountSource = result.source
@@ -518,18 +545,18 @@ function tryRegisterInterceptor(): void {
             if (result.tokenModel) snapshot.tokenModel = result.tokenModel
             if (result.tokenModelSource) snapshot.tokenModelSource = result.tokenModelSource
             if (result.error) snapshot.tokenizerError = result.error
-            spindle.sendToFrontend({ type: 'snapshot_updated', snapshot })
+            sendToUser(ctxUserId, { type: 'snapshot_updated', snapshot })
           })
 
           // Provider fallback — GENERATION_BREAKDOWN_READY fills provider for
           // live generations, but never fires for dry runs. Resolve it from
           // the connection profile (cached) so dry-run snapshots aren't bare.
-          resolveConnectionInfo(ctxSnapshot.connectionId, ctxUserId ?? currentUserId).then((info) => {
+          resolveConnectionInfo(ctxSnapshot.connectionId, ctxUserId).then((info) => {
             if (!info) return
             let changed = false
             if (!snapshot.provider && info.provider) { snapshot.provider = info.provider; changed = true }
             if (!snapshot.model && info.model) { snapshot.model = info.model; changed = true }
-            if (changed) spindle.sendToFrontend({ type: 'snapshot_updated', snapshot })
+            if (changed) sendToUser(ctxUserId, { type: 'snapshot_updated', snapshot })
           })
 
           // OOC marker detection. Runs unconditionally (no generationType gate)
@@ -543,10 +570,9 @@ function tryRegisterInterceptor(): void {
             if (detected.rejectedMessage !== undefined) snapshot.rejectedMessage = detected.rejectedMessage
           }
 
-          store.push(snapshot)
-          activeChatId = ctxSnapshot.chatId ?? activeChatId
+          state.store.push(snapshot)
 
-          spindle.sendToFrontend({
+          sendToUser(ctxUserId, {
             type: 'prompt_captured',
             snapshot,
           })
@@ -570,13 +596,14 @@ function tryRegisterGenerationEvents(): void {
   if (!spindle.permissions.has('generation')) return
 
   spindle.on('GENERATION_STARTED', (payload: any, userId?: string) => {
-    if (typeof userId === 'string' && userId) currentUserId = userId
+    if (!userId) return
     if (payload.generationId) {
-      activeGenerations.set(payload.generationId, {
+      stateFor(userId).activeGenerations.set(payload.generationId, {
         chatId: payload.chatId,
         model: payload.model,
         generationType: payload.generationType,
         targetMessageId: payload.targetMessageId,
+        targetSwipeId: typeof payload.targetSwipeId === 'number' ? payload.targetSwipeId : undefined,
       })
     }
   })
@@ -586,7 +613,7 @@ function tryRegisterGenerationEvents(): void {
   // (never for dry runs), carrying the same ground-truth data the native
   // Prompt Breakdown renders. Linked to our snapshot by generationId.
   spindle.on('GENERATION_BREAKDOWN_READY', (payload: any, userId?: string) => {
-    if (typeof userId === 'string' && userId) currentUserId = userId
+    if (!userId) return
     const b = payload?.breakdown
     if (!payload?.generationId || !b || typeof b !== 'object') return
 
@@ -598,7 +625,7 @@ function tryRegisterGenerationEvents(): void {
         }
       : undefined
 
-    const snap = store.attachGenerationInfo(payload.generationId, {
+    const snap = stateFor(userId).store.attachGenerationInfo(payload.generationId, {
       parameters: b.parameters && typeof b.parameters === 'object' && !Array.isArray(b.parameters)
         ? b.parameters as Record<string, unknown>
         : undefined,
@@ -609,15 +636,16 @@ function tryRegisterGenerationEvents(): void {
       model: typeof b.model === 'string' && b.model ? b.model : undefined,
     })
     if (snap) {
-      spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: snap })
+      sendToUser(userId, { type: 'snapshot_updated', snapshot: snap })
     }
   })
 
   spindle.on('GENERATION_ENDED', async (payload: any, userId?: string) => {
-    if (typeof userId === 'string' && userId) currentUserId = userId
+    if (!userId) return
+    const state = stateFor(userId)
     const genId = payload.generationId
     if (genId) {
-      activeGenerations.delete(genId)
+      state.activeGenerations.delete(genId)
     }
     if (!payload.chatId || !payload.messageId) return
 
@@ -627,27 +655,29 @@ function tryRegisterGenerationEvents(): void {
       const msgNum = index !== -1 ? index : undefined
       const msg = index !== -1 ? messages[index] as any : null
       const swipeIndex = typeof msg?.swipe_id === 'number' ? msg.swipe_id : undefined
-      store.linkMessage(payload.chatId, payload.messageId, msgNum, genId, swipeIndex)
+      const updated = state.store.linkMessage(payload.chatId, payload.messageId, msgNum, genId, swipeIndex)
       const key = swipeKey(payload.chatId, payload.messageId)
-      if (key) pendingSwipeAdds.delete(key)
+      if (key) state.pendingSwipeAdds.delete(key)
 
-      const updated = store.getAll(payload.chatId).find((s) => s.messageId === payload.messageId)
       if (updated) {
-        spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: updated })
+        sendToUser(userId, { type: 'snapshot_updated', snapshot: updated })
       }
     } catch (err: any) {
-      store.linkMessage(payload.chatId, payload.messageId, undefined, genId)
+      const updated = state.store.linkMessage(payload.chatId, payload.messageId, undefined, genId)
+      if (updated) sendToUser(userId, { type: 'snapshot_updated', snapshot: updated })
     }
   })
 
-  spindle.on('GENERATION_STOPPED', (payload: any) => {
+  spindle.on('GENERATION_STOPPED', (payload: any, userId?: string) => {
+    if (!userId) return
+    const state = stateFor(userId)
     const genId = payload.generationId
     if (genId) {
-      activeGenerations.delete(genId)
+      state.activeGenerations.delete(genId)
 
-      const snap = store.markAborted(genId)
+      const snap = state.store.markAborted(genId)
       if (snap) {
-        spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: snap })
+        sendToUser(userId, { type: 'snapshot_updated', snapshot: snap })
       }
     }
   })
@@ -684,43 +714,42 @@ interface PendingAutoDryRunEvidence {
   messageId?: string
 }
 
-const pendingAutoDryRunEvidence = new Map<string, PendingAutoDryRunEvidence>()
-
 function evidenceWindowMs(reason: LikelyAutoDryRunReason): number {
   return reason === 'chat-entry'
     ? CHAT_ENTRY_DRY_RUN_WINDOW_MS
     : REGEN_MUTATION_DRY_RUN_WINDOW_MS
 }
 
-function prunePendingAutoDryRunEvidence(now = Date.now()): void {
-  for (const [chatId, evidence] of pendingAutoDryRunEvidence) {
+function prunePendingAutoDryRunEvidence(state: UserState, now = Date.now()): void {
+  for (const [chatId, evidence] of state.pendingAutoDryRunEvidence) {
     if (now - evidence.timestamp >= evidenceWindowMs(evidence.reason)) {
-      pendingAutoDryRunEvidence.delete(chatId)
+      state.pendingAutoDryRunEvidence.delete(chatId)
     }
   }
 }
 
 function markPendingAutoDryRunEvidence(
+  state: UserState,
   chatId: string,
   reason: LikelyAutoDryRunReason,
   options: { now?: number; messageId?: string } = {},
 ): void {
   const now = options.now ?? Date.now()
-  prunePendingAutoDryRunEvidence(now)
-  pendingAutoDryRunEvidence.set(chatId, {
+  prunePendingAutoDryRunEvidence(state, now)
+  state.pendingAutoDryRunEvidence.set(chatId, {
     reason,
     timestamp: now,
     messageId: options.messageId,
   })
 }
 
-function consumeAutoDryRunEvidence(chatId: string, now: number): AutoDryRunEvidence | undefined {
-  const evidence = pendingAutoDryRunEvidence.get(chatId)
+function consumeAutoDryRunEvidence(state: UserState, chatId: string, now: number): AutoDryRunEvidence | undefined {
+  const evidence = state.pendingAutoDryRunEvidence.get(chatId)
   if (!evidence) return undefined
 
   // Always consume once. An expired or coincidental marker must not tag a
   // later Dry Run merely because no earlier capture used it.
-  pendingAutoDryRunEvidence.delete(chatId)
+  state.pendingAutoDryRunEvidence.delete(chatId)
 
   const ageMs = Math.max(0, now - evidence.timestamp)
   if (ageMs >= evidenceWindowMs(evidence.reason)) return undefined
@@ -739,31 +768,35 @@ function consumeAutoDryRunEvidence(chatId: string, now: number): AutoDryRunEvide
  * the latest such message. If linkage is unavailable, preserve compatibility
  * and allow the short-lived heuristic rather than silently missing regens.
  */
-function isLikelyRegenerationDeletion(chatId: string, messageId?: string): boolean {
+function isLikelyRegenerationDeletion(state: UserState, chatId: string, messageId?: string): boolean {
   if (!messageId) return false
-  const latestLinkedLive = store.getAll(chatId)
+  const latestLinkedLive = state.store.getAll(chatId)
     .find((snapshot) => !snapshot.isDryRun && typeof snapshot.messageId === 'string')
   return latestLinkedLive ? latestLinkedLive.messageId === messageId : true
 }
 
-spindle.on('CHAT_SWITCHED', (payload: any) => {
+spindle.on('CHAT_SWITCHED', (payload: any, userId?: string) => {
+  if (!userId) return
+  const state = stateFor(userId)
   const chatId = payload.chatId ?? null
-  activeChatId = chatId
+  state.activeChatId = chatId
   if (chatId) {
-    markPendingAutoDryRunEvidence(chatId, 'chat-entry')
+    markPendingAutoDryRunEvidence(state, chatId, 'chat-entry')
   }
 
-  spindle.sendToFrontend({
+  sendToUser(userId, {
     type: 'chat_changed',
     chatId,
-    snapshots: chatId ? store.getAll(chatId) : [],
+    snapshots: chatId ? state.store.getAll(chatId) : [],
   })
 })
 
 // ---------------------------------------------------------------------------
 // Swipe discrimination (free tier — MESSAGE_SWIPED is a chat lifecycle event)
 // ---------------------------------------------------------------------------
-spindle.on('MESSAGE_SWIPED', (payload: any) => {
+spindle.on('MESSAGE_SWIPED', (payload: any, userId?: string) => {
+  if (!userId) return
+  const state = stateFor(userId)
   if (payload.action !== 'added') return
   const chatId = payload.chatId
   if (!chatId) return
@@ -776,27 +809,24 @@ spindle.on('MESSAGE_SWIPED', (payload: any) => {
     ? payload.message.swipes[payload.swipeId]
     : undefined
   if (addedSwipe === '' || payload.message?.content === '') {
-    markPendingAutoDryRunEvidence(chatId, 'regen-mutation', {
+    markPendingAutoDryRunEvidence(state, chatId, 'regen-mutation', {
       messageId: typeof payload.message?.id === 'string' ? payload.message.id : undefined,
     })
   }
 
-  prunePendingSwipes()
+  prunePendingSwipes(state)
   const messageId = payload.message?.id
   const key = swipeKey(chatId, messageId)
-  if (key) pendingSwipeAdds.set(key, { swipeIndex: payload.swipeId, timestamp: Date.now() })
-
-  const snap = store.tagAsSwipe(chatId, messageId, payload.swipeId)
-  if (snap) {
-    spindle.sendToFrontend({ type: 'snapshot_updated', snapshot: snap })
-  }
+  if (key) state.pendingSwipeAdds.set(key, { swipeIndex: payload.swipeId, timestamp: Date.now() })
 })
 
 // ---------------------------------------------------------------------------
 // Message lifecycle (free tier)
 // ---------------------------------------------------------------------------
-spindle.on('MESSAGE_DELETED', async (payload: any) => {
-  const chatId = payload.chatId || activeChatId
+spindle.on('MESSAGE_DELETED', async (payload: any, userId?: string) => {
+  if (!userId) return
+  const state = stateFor(userId)
+  const chatId = payload.chatId || state.activeChatId
   if (!chatId) return
 
   // Composer Regenerate deletes the prior assistant message before prompt
@@ -806,8 +836,8 @@ spindle.on('MESSAGE_DELETED', async (payload: any) => {
   const deletedMessageId = typeof payload.messageId === 'string'
     ? payload.messageId
     : undefined
-  if (isLikelyRegenerationDeletion(chatId, deletedMessageId)) {
-    markPendingAutoDryRunEvidence(chatId, 'regen-mutation', {
+  if (isLikelyRegenerationDeletion(state, chatId, deletedMessageId)) {
+    markPendingAutoDryRunEvidence(state, chatId, 'regen-mutation', {
       messageId: deletedMessageId,
     })
   }
@@ -815,17 +845,17 @@ spindle.on('MESSAGE_DELETED', async (payload: any) => {
   let removed = 0
 
   if (payload.messageId) {
-    removed += store.deleteByMessageId(payload.messageId)
+    removed += state.store.deleteByMessageId(payload.messageId)
   }
 
   if (removed === 0 && payload.messageId) {
     try {
       const currentMessages = await spindle.chat.getMessages(chatId)
       const currentIds = new Set(currentMessages.map((m: any) => m.id))
-      const snapshots = store.getAll(chatId)
+      const snapshots = state.store.getAll(chatId)
       for (const snap of snapshots) {
         if (snap.messageId && !currentIds.has(snap.messageId)) {
-          store.deleteByMessageId(snap.messageId)
+          state.store.deleteByMessageId(snap.messageId)
           removed++
         }
       }
@@ -834,54 +864,54 @@ spindle.on('MESSAGE_DELETED', async (payload: any) => {
     }
   }
 
-  spindle.sendToFrontend({
+  sendToUser(userId, {
     type: 'prompt_history',
-    snapshots: store.getAll(chatId),
+    snapshots: state.store.getAll(chatId),
   })
 })
 
 // ---------------------------------------------------------------------------
 // Frontend message handler (free tier)
 // ---------------------------------------------------------------------------
-spindle.onFrontendMessage(async (payload: any, userId: string) => {
-  currentUserId = userId
-  const chatId = payload.chatId || activeChatId
+spindle.onFrontendMessage(async (payload: any, userId: string, frontendSessionId?: string) => {
+  const state = stateFor(userId)
+  const chatId = payload.chatId || state.activeChatId
   switch (payload.type) {
     case 'get_latest':
-      spindle.sendToFrontend({
+      sendToUser(userId, {
         type: 'prompt_data',
-        snapshot: store.getLatest(chatId),
-      })
+        snapshot: state.store.getLatest(chatId),
+      }, frontendSessionId)
       break
 
     case 'get_history':
-      spindle.sendToFrontend({
+      sendToUser(userId, {
         type: 'prompt_history',
-        snapshots: store.getAll(chatId),
-      })
+        snapshots: state.store.getAll(chatId),
+      }, frontendSessionId)
       break
 
     case 'get_by_id':
-      spindle.sendToFrontend({
+      sendToUser(userId, {
         type: 'prompt_data',
-        snapshot: store.getById(payload.id),
-      })
+        snapshot: state.store.getById(payload.id),
+      }, frontendSessionId)
       break
 
     case 'clear_history':
-      store.clearChat(chatId)
-      spindle.sendToFrontend({ type: 'history_cleared' })
+      state.store.clearChat(chatId)
+      sendToUser(userId, { type: 'history_cleared' }, frontendSessionId)
       break
 
     case 'get_settings': {
-      const settings = await loadSettings()
-      spindle.sendToFrontend({ type: 'settings_loaded', settings })
+      const settings = await loadSettings(userId)
+      sendToUser(userId, { type: 'settings_loaded', settings }, frontendSessionId)
       break
     }
 
     case 'save_settings':
       try {
-        await saveSettings(payload.settings)
+        await saveSettings(payload.settings, userId)
       } catch (err: any) {
         spindle.toast.error(`Failed to save settings: ${err?.message ?? err}`)
       }
