@@ -90,6 +90,10 @@ export interface PromptSnapshot {
   wasAborted?: boolean
   /** True if token count is approximate rather than a model tokenizer count. */
   approximateTokens?: boolean
+  /** Text-block counts aligned with messages; multipart projections stay approximate. */
+  messageTokenCounts?: { tokens: number; approximate: boolean }[]
+  /** Count of the extracted rejected-message text, without its feedback wrapper. */
+  rejectedMessageTokenCount?: { tokens: number; approximate: boolean }
   /** Where the token count came from. */
   tokenCountSource?: TokenCountSource
   /** Model resolved/used for token counting, if available. */
@@ -138,17 +142,26 @@ export class PromptStore {
     }
   }
 
-  getLatest(chatId?: string): PromptSnapshot | null {
+  getLatest(chatId?: string | null): PromptSnapshot | null {
     return this.getAll(chatId)[0] ?? null
   }
 
-  getAll(chatId?: string): PromptSnapshot[] {
+  getAll(chatId?: string | null): PromptSnapshot[] {
+    if (chatId === null) return []
     const arr = chatId ? this.getChat(chatId) : this.all
     return [...arr].reverse()
   }
 
-  getById(id: string): PromptSnapshot | null {
-    return this.all.find((s) => s.id === id) ?? null
+  getById(id: string, chatId?: string | null): PromptSnapshot | null {
+    if (chatId === null) return null
+    return this.all.find((s) => s.id === id && (chatId === undefined || s.context.chatId === chatId)) ?? null
+  }
+
+  /** Late enrichment must not publish captures removed from either relevant index. */
+  contains(snap: PromptSnapshot): boolean {
+    if (!this.all.includes(snap)) return false
+    const chatId = snap.context.chatId
+    return !chatId || (this.chats.get(chatId)?.includes(snap) ?? false)
   }
 
   private replaceSnapshot(updated: PromptSnapshot): void {
@@ -221,7 +234,8 @@ export class PromptStore {
     return removed
   }
 
-  clearChat(chatId?: string): void {
+  clearChat(chatId?: string | null): void {
+    if (chatId === null) return
     if (!chatId) {
       this.all = []
       this.chats.clear()

@@ -3,17 +3,15 @@
 // =============================================================================
 
 import { PromptStore } from './storage/prompt-store'
-import type { PromptSnapshot, LlmMessage, InterceptorMeta, TokenCountSource, AutoDryRunEvidence, LikelyAutoDryRunReason } from './storage/prompt-store'
+import type { PromptSnapshot, LlmMessage, InterceptorMeta, AutoDryRunEvidence, LikelyAutoDryRunReason } from './storage/prompt-store'
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
 interface UserState {
   store: PromptStore
-  activeChatId: string | null
   activeGenerations: Map<string, ActiveGenerationMeta>
   pendingSwipeAdds: Map<string, { swipeIndex?: number; timestamp: number }>
   pendingAutoDryRunEvidence: Map<string, PendingAutoDryRunEvidence>
-  connectionInfoCache: Map<string, { provider?: string; model?: string }>
 }
 
 const userStates = new Map<string, UserState>()
@@ -23,11 +21,9 @@ function stateFor(userId: string): UserState {
   if (!state) {
     state = {
       store: new PromptStore(),
-      activeChatId: null,
       activeGenerations: new Map(),
       pendingSwipeAdds: new Map(),
       pendingAutoDryRunEvidence: new Map(),
-      connectionInfoCache: new Map(),
     }
     userStates.set(userId, state)
   }
@@ -303,79 +299,132 @@ function estimateTokensFallback(messages: LlmMessage[]): number {
   return Math.ceil(chars / 4)
 }
 
-async function countTokens(
-  messages: LlmMessage[],
-  model?: string,
-  userId?: string,
-): Promise<{
-  tokens: number
+interface NativeTokenCountResult {
+  total_tokens: number
   approximate: boolean
-  source: TokenCountSource
-  tokenizer?: string
-  tokenModel?: string
-  tokenModelSource?: 'main' | 'sidecar' | 'explicit'
-  error?: string
-}> {
-  try {
-    const opts: { model?: string; modelSource?: 'main'; userId?: string } = {}
-    if (model) opts.model = model
-    else opts.modelSource = 'main'
-    if (userId) opts.userId = userId
+  tokenizer_name: string
+  model: string
+  modelSource: 'main' | 'sidecar' | 'explicit'
+}
+type TokenCountOptions = { model?: string; modelSource?: 'main'; userId: string }
+type SnapshotTokenCounts = Pick<PromptSnapshot,
+  'estimatedTokens' | 'approximateTokens' | 'tokenCountSource' | 'tokenizer' |
+  'tokenModel' | 'tokenModelSource' | 'tokenizerError' |
+  'messageTokenCounts' | 'rejectedMessageTokenCount'>
 
-    // Native countMessages currently requires string content. Keep the captured
-    // messages lossless, but send Lumiverse a text projection for counting.
-    const result = await spindle.tokens.countMessages(
-      messages.map((m) => ({ role: m.role, content: messageText(m.content) })),
-      opts,
-    )
-    return {
-      tokens: result.total_tokens,
-      approximate: result.approximate,
-      source: result.approximate ? 'native_approximate' : 'native',
-      tokenizer: result.tokenizer_name,
-      tokenModel: result.model,
-      tokenModelSource: result.modelSource,
-    }
-  } catch (err: any) {
-    const error = err?.message ?? String(err)
-    spindle.log.warn(`Prompt Viewer native token count failed; using chars/4 fallback: ${error}`)
-    return {
-      tokens: estimateTokensFallback(messages),
-      approximate: true,
-      source: 'fallback',
-      error,
+async function countTokens(
+  snapshot: PromptSnapshot,
+  model: string | undefined,
+  userId: string,
+  canEnrich: () => boolean,
+): Promise<SnapshotTokenCounts> {
+  const opts: TokenCountOptions = model ? { model, userId } : { modelSource: 'main', userId }
+  const projectedMessages = snapshot.messages.map((m) => ({ role: m.role, content: messageText(m.content) }))
+  const messageTokenCounts = snapshot.messageTokenCounts!.slice()
+  const counts: SnapshotTokenCounts = {
+    estimatedTokens: snapshot.estimatedTokens,
+    approximateTokens: true,
+    tokenCountSource: 'fallback',
+    messageTokenCounts,
+    rejectedMessageTokenCount: snapshot.rejectedMessageTokenCount,
+  }
+  const errors: string[] = []
+
+  try {
+    // Native counting requires string content. Never replace the original
+    // capture with this projection, or call multipart totals exact.
+    const result = await spindle.tokens.countMessages(projectedMessages, opts)
+    if (!canEnrich()) return counts
+    const approximate = result.approximate || snapshot.messages.some((m) => typeof m.content !== 'string')
+    counts.estimatedTokens = result.total_tokens
+    counts.approximateTokens = approximate
+    counts.tokenCountSource = approximate ? 'native_approximate' : 'native'
+    counts.tokenizer = result.tokenizer_name
+    counts.tokenModel = result.model
+    counts.tokenModelSource = result.modelSource
+    // Freeze the native-resolved default too, so every block uses the same
+    // model even if the user edits their default while enrichment is pending.
+    opts.model = result.model
+    delete opts.modelSource
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err))
+  }
+
+  if (!canEnrich()) return counts
+  const texts = projectedMessages.map((m) => m.content)
+  if (snapshot.rejectedMessage !== undefined) texts.push(snapshot.rejectedMessage)
+  // Lumiverse 1.2.5 implements this API; published types omit it.
+  const tokenApi = spindle.tokens as typeof spindle.tokens & {
+    countTextBatch(texts: string[], options: TokenCountOptions): Promise<(NativeTokenCountResult & { index: number })[]>
+  }
+  // The native endpoint accepts at most 64 texts per batch.
+  for (let offset = 0; offset < texts.length; offset += 64) {
+    if (!canEnrich()) return counts
+    try {
+      const results = await tokenApi.countTextBatch(texts.slice(offset, offset + 64), opts)
+      if (!canEnrich()) return counts
+      for (const result of results) {
+        const index = offset + result.index
+        const count = {
+          tokens: result.total_tokens,
+          approximate: result.approximate || (index < snapshot.messages.length && typeof snapshot.messages[index].content !== 'string'),
+        }
+        if (index < snapshot.messages.length) messageTokenCounts[index] = count
+        else counts.rejectedMessageTokenCount = count
+      }
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err))
     }
   }
+
+  if (errors.length) {
+    counts.tokenizerError = errors.join('; ')
+    spindle.log.warn(`Prompt Viewer native token count failed; retaining chars/4 fallback: ${counts.tokenizerError}`)
+  }
+  return counts
 }
 
 // ---------------------------------------------------------------------------
 // Connection profile lookup — provider/model fallback for snapshots that never
 // receive a GENERATION_BREAKDOWN_READY event (dry runs). The connections API
 // is gated behind the `generation` permission, which the manifest declares.
-// Typed loosely because lumiverse-spindle-types may predate the API.
 // ---------------------------------------------------------------------------
 async function resolveConnectionInfo(
   connectionId: unknown,
   userId: string,
 ): Promise<{ provider?: string; model?: string } | null> {
-  if (typeof connectionId !== 'string' || !connectionId) return null
-  const cache = stateFor(userId).connectionInfoCache
-  const cached = cache.get(connectionId)
-  if (cached) return cached
+  if (typeof connectionId !== 'string' || !connectionId || !spindle.permissions.has('generation')) return null
   try {
-    const api = (spindle as any).connections
-    if (!api?.get) return null
-    const conn = await api.get(connectionId, userId)
-    const info = {
-      provider: typeof conn?.provider === 'string' && conn.provider ? conn.provider : undefined,
-      model: typeof conn?.model === 'string' && conn.model ? conn.model : undefined,
+    const api = spindle as typeof spindle & {
+      connections: {
+        get(connectionId: string, userId: string): Promise<{ provider?: string; model?: string } | null>
+      }
     }
-    if (cache.size > 50) cache.clear()
-    cache.set(connectionId, info)
-    return info
+    // Read each capture's selected profile afresh: profiles can be edited
+    // without changing their IDs, so a persistent cache would count stale models.
+    const conn = await api.connections.get(connectionId, userId)
+    return {
+      provider: typeof conn?.provider === 'string' && conn.provider ? conn.provider : undefined,
+      model: typeof conn?.model === 'string' && conn.model.trim() ? conn.model.trim() : undefined,
+    }
   } catch {
     return null
   }
+}
+
+async function enrichSnapshot(snapshot: PromptSnapshot, state: UserState, userId: string, epoch: number): Promise<void> {
+  const canEnrich = () => epoch === enrichmentEpoch
+    && spindle.permissions.has('interceptor')
+    && state.store.contains(snapshot)
+  if (!canEnrich()) return
+  const info = await resolveConnectionInfo(snapshot.context.connectionId, userId)
+  if (!canEnrich()) return
+  const counts = await countTokens(snapshot, snapshot.model ?? info?.model, userId, canEnrich)
+  if (!canEnrich()) return
+  Object.assign(snapshot, counts)
+  if (!snapshot.provider && info?.provider) snapshot.provider = info.provider
+  if (!snapshot.model && info?.model) snapshot.model = info.model
+  sendToUser(userId, { type: 'snapshot_updated', chatId: snapshot.context.chatId ?? null, snapshot })
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +436,19 @@ interface ActiveGenerationMeta {
   generationType?: string
   targetMessageId?: string
   targetSwipeId?: number
+}
+
+interface GenerationEventPayload extends ActiveGenerationMeta {
+  generationId?: string
+  messageId?: string
+  breakdown?: {
+    parameters?: Record<string, unknown>
+    provider?: string
+    presetName?: string
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+    maxContext?: number
+    model?: string
+  }
 }
 
 function swipeKey(chatId?: string, messageId?: string): string | null {
@@ -453,14 +515,19 @@ function cloneSafe<T>(value: T): T {
 // at startup and also listen for live permission grants so we register as
 // soon as the permission becomes available.
 // ---------------------------------------------------------------------------
-let interceptorRegistered = false
-let generationEventsRegistered = false
+let interceptorDisposer: (() => void) | null = null
+let generationEventUnsubscribes: (() => void)[] = []
+let interceptorEpoch = 0
+let generationEpoch = 0
+let enrichmentEpoch = 0
 
 function tryRegisterInterceptor(): void {
-  if (interceptorRegistered) return
+  if (interceptorDisposer) return
   if (!spindle.permissions.has('interceptor')) return
 
-  spindle.registerInterceptor(async (messages, context) => {
+  const registrationEpoch = interceptorEpoch
+  interceptorDisposer = spindle.registerInterceptor(async (messages, context) => {
+    if (registrationEpoch !== interceptorEpoch || !spindle.permissions.has('interceptor')) return messages
     try {
       const ctx = context as unknown as InterceptorMeta
 
@@ -487,12 +554,14 @@ function tryRegisterInterceptor(): void {
         return messages
       }
       const state = stateFor(ctxUserId)
+      const captureEnrichmentEpoch = enrichmentEpoch
 
       // queueMicrotask (NOT setTimeout): microtasks drain before the worker
       // can process any subsequent host postMessage, so activeGenerations and
       // pendingSwipeAdds are read in exactly the state a synchronous read
       // would have seen — a later GENERATION_ENDED cannot sneak in between.
       queueMicrotask(() => {
+        if (registrationEpoch !== interceptorEpoch || !spindle.permissions.has('interceptor')) return
         try {
           const snapshot: PromptSnapshot = {
             id: crypto.randomUUID(),
@@ -502,6 +571,10 @@ function tryRegisterInterceptor(): void {
             estimatedTokens: estimateTokensFallback(capturedMessages),
             tokenCountSource: 'fallback',
             approximateTokens: true,
+            messageTokenCounts: capturedMessages.map((m) => ({
+              tokens: Math.ceil(messageText(m.content).length / 4),
+              approximate: true,
+            })),
           }
 
           // Staging provides an authoritative dryRun boolean in interceptor
@@ -512,7 +585,7 @@ function tryRegisterInterceptor(): void {
           const contextDryRun = typeof ctxSnapshot.dryRun === 'boolean'
             ? ctxSnapshot.dryRun
             : undefined
-          const active = contextDryRun === true
+          const active = contextDryRun === true || !spindle.permissions.has('generation')
             ? null
             : getActiveGenerationForChat(state, ctxSnapshot.chatId)
           snapshot.isDryRun = contextDryRun ?? !active
@@ -536,28 +609,6 @@ function tryRegisterInterceptor(): void {
             }
           }
 
-          // Async token count — fire and forget, update snapshot when ready
-          countTokens(capturedMessages, snapshot.model, ctxUserId).then((result) => {
-            snapshot.estimatedTokens = result.tokens
-            snapshot.approximateTokens = result.approximate
-            snapshot.tokenCountSource = result.source
-            if (result.tokenizer) snapshot.tokenizer = result.tokenizer
-            if (result.tokenModel) snapshot.tokenModel = result.tokenModel
-            if (result.tokenModelSource) snapshot.tokenModelSource = result.tokenModelSource
-            if (result.error) snapshot.tokenizerError = result.error
-            sendToUser(ctxUserId, { type: 'snapshot_updated', snapshot })
-          })
-
-          // Provider fallback — GENERATION_BREAKDOWN_READY fills provider for
-          // live generations, but never fires for dry runs. Resolve it from
-          // the connection profile (cached) so dry-run snapshots aren't bare.
-          resolveConnectionInfo(ctxSnapshot.connectionId, ctxUserId).then((info) => {
-            if (!info) return
-            let changed = false
-            if (!snapshot.provider && info.provider) { snapshot.provider = info.provider; changed = true }
-            if (!snapshot.model && info.model) { snapshot.model = info.model; changed = true }
-            if (changed) sendToUser(ctxUserId, { type: 'snapshot_updated', snapshot })
-          })
 
           // OOC marker detection. Runs unconditionally (no generationType gate)
           // so composer-regen, swipe, and the explicit regenerate path all
@@ -567,36 +618,50 @@ function tryRegisterInterceptor(): void {
             snapshot.regenFeedback = detected.text
             snapshot.regenFeedbackRaw = detected.raw
             snapshot.regenFeedbackPosition = detected.position
-            if (detected.rejectedMessage !== undefined) snapshot.rejectedMessage = detected.rejectedMessage
+            if (detected.rejectedMessage !== undefined) {
+              snapshot.rejectedMessage = detected.rejectedMessage
+              snapshot.rejectedMessageTokenCount = {
+                tokens: Math.ceil(detected.rejectedMessage.length / 4),
+                approximate: true,
+              }
+            }
           }
 
           state.store.push(snapshot)
 
           sendToUser(ctxUserId, {
             type: 'prompt_captured',
+            chatId: ctxSnapshot.chatId ?? null,
             snapshot,
           })
-        } catch (err: any) {
-          spindle.log.error(`Failed to capture prompt: ${err?.message ?? err}`)
+          void enrichSnapshot(snapshot, state, ctxUserId, captureEnrichmentEpoch).catch((err: unknown) => {
+            spindle.log.error(`Failed to enrich prompt: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        } catch (err) {
+          spindle.log.error(`Failed to capture prompt: ${err instanceof Error ? err.message : String(err)}`)
         }
       })
-    } catch (err: any) {
-      spindle.log.error(`Failed to capture prompt: ${err?.message ?? err}`)
+    } catch (err) {
+      spindle.log.error(`Failed to capture prompt: ${err instanceof Error ? err.message : String(err)}`)
     }
 
     return messages
   }, 999)
 
-  interceptorRegistered = true
   spindle.log.info('Interceptor registered.')
 }
 
 function tryRegisterGenerationEvents(): void {
-  if (generationEventsRegistered) return
+  if (generationEventUnsubscribes.length) return
   if (!spindle.permissions.has('generation')) return
 
-  spindle.on('GENERATION_STARTED', (payload: any, userId?: string) => {
-    if (!userId) return
+  const registrationEpoch = generationEpoch
+  const canHandleGeneration = () => registrationEpoch === generationEpoch
+    && spindle.permissions.has('generation')
+    && spindle.permissions.has('interceptor')
+  generationEventUnsubscribes.push(spindle.on('GENERATION_STARTED', (value: unknown, userId?: string) => {
+    const payload = value as GenerationEventPayload
+    if (!userId || !canHandleGeneration()) return
     if (payload.generationId) {
       stateFor(userId).activeGenerations.set(payload.generationId, {
         chatId: payload.chatId,
@@ -606,14 +671,15 @@ function tryRegisterGenerationEvents(): void {
         targetSwipeId: typeof payload.targetSwipeId === 'number' ? payload.targetSwipeId : undefined,
       })
     }
-  })
+  }))
 
   // Final outbound parameters, provider, preset, and real usage. Emitted by
   // the host's deferred post-processing after a live generation completes
   // (never for dry runs), carrying the same ground-truth data the native
   // Prompt Breakdown renders. Linked to our snapshot by generationId.
-  spindle.on('GENERATION_BREAKDOWN_READY', (payload: any, userId?: string) => {
-    if (!userId) return
+  generationEventUnsubscribes.push(spindle.on('GENERATION_BREAKDOWN_READY', (value: unknown, userId?: string) => {
+    const payload = value as GenerationEventPayload
+    if (!userId || !canHandleGeneration()) return
     const b = payload?.breakdown
     if (!payload?.generationId || !b || typeof b !== 'object') return
 
@@ -636,12 +702,14 @@ function tryRegisterGenerationEvents(): void {
       model: typeof b.model === 'string' && b.model ? b.model : undefined,
     })
     if (snap) {
-      sendToUser(userId, { type: 'snapshot_updated', snapshot: snap })
+      sendToUser(userId, { type: 'snapshot_updated', chatId: snap.context.chatId ?? null, snapshot: snap })
     }
-  })
+  }))
 
-  spindle.on('GENERATION_ENDED', async (payload: any, userId?: string) => {
-    if (!userId) return
+  generationEventUnsubscribes.push(spindle.on('GENERATION_ENDED', async (value: unknown, userId?: string) => {
+    const payload = value as GenerationEventPayload
+    if (!userId || !canHandleGeneration()) return
+    const eventEpoch = enrichmentEpoch
     const state = stateFor(userId)
     const genId = payload.generationId
     if (genId) {
@@ -651,25 +719,28 @@ function tryRegisterGenerationEvents(): void {
 
     try {
       const messages = await spindle.chat.getMessages(payload.chatId)
-      const index = messages.findIndex((m: any) => m.id === payload.messageId)
+      if (!canHandleGeneration() || eventEpoch !== enrichmentEpoch) return
+      const index = messages.findIndex((m) => m.id === payload.messageId)
       const msgNum = index !== -1 ? index : undefined
-      const msg = index !== -1 ? messages[index] as any : null
+      const msg = index !== -1 ? messages[index] : null
       const swipeIndex = typeof msg?.swipe_id === 'number' ? msg.swipe_id : undefined
       const updated = state.store.linkMessage(payload.chatId, payload.messageId, msgNum, genId, swipeIndex)
       const key = swipeKey(payload.chatId, payload.messageId)
       if (key) state.pendingSwipeAdds.delete(key)
 
       if (updated) {
-        sendToUser(userId, { type: 'snapshot_updated', snapshot: updated })
+        sendToUser(userId, { type: 'snapshot_updated', chatId: payload.chatId, snapshot: updated })
       }
-    } catch (err: any) {
+    } catch {
+      if (!canHandleGeneration() || eventEpoch !== enrichmentEpoch) return
       const updated = state.store.linkMessage(payload.chatId, payload.messageId, undefined, genId)
-      if (updated) sendToUser(userId, { type: 'snapshot_updated', snapshot: updated })
+      if (updated) sendToUser(userId, { type: 'snapshot_updated', chatId: payload.chatId, snapshot: updated })
     }
-  })
+  }))
 
-  spindle.on('GENERATION_STOPPED', (payload: any, userId?: string) => {
-    if (!userId) return
+  generationEventUnsubscribes.push(spindle.on('GENERATION_STOPPED', (value: unknown, userId?: string) => {
+    const payload = value as GenerationEventPayload
+    if (!userId || !canHandleGeneration()) return
     const state = stateFor(userId)
     const genId = payload.generationId
     if (genId) {
@@ -677,12 +748,11 @@ function tryRegisterGenerationEvents(): void {
 
       const snap = state.store.markAborted(genId)
       if (snap) {
-        sendToUser(userId, { type: 'snapshot_updated', snapshot: snap })
+        sendToUser(userId, { type: 'snapshot_updated', chatId: snap.context.chatId ?? null, snapshot: snap })
       }
     }
-  })
+  }))
 
-  generationEventsRegistered = true
   spindle.log.info('Generation event listeners registered.')
 }
 
@@ -695,6 +765,22 @@ spindle.permissions.onChanged(({ permission, granted }) => {
   if (granted) {
     if (permission === 'interceptor') tryRegisterInterceptor()
     if (permission === 'generation') tryRegisterGenerationEvents()
+    return
+  }
+  if (permission !== 'interceptor' && permission !== 'generation') return
+  enrichmentEpoch++
+  if (permission === 'interceptor') {
+    interceptorEpoch++
+    interceptorDisposer?.()
+    interceptorDisposer = null
+  } else {
+    generationEpoch++
+    for (const unsubscribe of generationEventUnsubscribes) unsubscribe()
+    generationEventUnsubscribes = []
+  }
+  for (const state of userStates.values()) {
+    state.activeGenerations.clear()
+    state.pendingSwipeAdds.clear()
   }
 })
 
@@ -775,11 +861,11 @@ function isLikelyRegenerationDeletion(state: UserState, chatId: string, messageI
   return latestLinkedLive ? latestLinkedLive.messageId === messageId : true
 }
 
-spindle.on('CHAT_SWITCHED', (payload: any, userId?: string) => {
+spindle.on('CHAT_SWITCHED', (value: unknown, userId?: string) => {
+  const payload = value as { chatId?: string | null }
   if (!userId) return
   const state = stateFor(userId)
-  const chatId = payload.chatId ?? null
-  state.activeChatId = chatId
+  const chatId = typeof payload.chatId === 'string' && payload.chatId ? payload.chatId : null
   if (chatId) {
     markPendingAutoDryRunEvidence(state, chatId, 'chat-entry')
   }
@@ -787,7 +873,7 @@ spindle.on('CHAT_SWITCHED', (payload: any, userId?: string) => {
   sendToUser(userId, {
     type: 'chat_changed',
     chatId,
-    snapshots: chatId ? state.store.getAll(chatId) : [],
+    snapshots: state.store.getAll(chatId),
   })
 })
 
@@ -823,10 +909,11 @@ spindle.on('MESSAGE_SWIPED', (payload: any, userId?: string) => {
 // ---------------------------------------------------------------------------
 // Message lifecycle (free tier)
 // ---------------------------------------------------------------------------
-spindle.on('MESSAGE_DELETED', async (payload: any, userId?: string) => {
+spindle.on('MESSAGE_DELETED', async (value: unknown, userId?: string) => {
+  const payload = value as { chatId?: string | null; messageId?: string }
   if (!userId) return
   const state = stateFor(userId)
-  const chatId = payload.chatId || state.activeChatId
+  const chatId = typeof payload.chatId === 'string' && payload.chatId ? payload.chatId : null
   if (!chatId) return
 
   // Composer Regenerate deletes the prior assistant message before prompt
@@ -851,7 +938,7 @@ spindle.on('MESSAGE_DELETED', async (payload: any, userId?: string) => {
   if (removed === 0 && payload.messageId) {
     try {
       const currentMessages = await spindle.chat.getMessages(chatId)
-      const currentIds = new Set(currentMessages.map((m: any) => m.id))
+      const currentIds = new Set(currentMessages.map((m) => m.id))
       const snapshots = state.store.getAll(chatId)
       for (const snap of snapshots) {
         if (snap.messageId && !currentIds.has(snap.messageId)) {
@@ -866,6 +953,7 @@ spindle.on('MESSAGE_DELETED', async (payload: any, userId?: string) => {
 
   sendToUser(userId, {
     type: 'prompt_history',
+    chatId,
     snapshots: state.store.getAll(chatId),
   })
 })
@@ -873,13 +961,22 @@ spindle.on('MESSAGE_DELETED', async (payload: any, userId?: string) => {
 // ---------------------------------------------------------------------------
 // Frontend message handler (free tier)
 // ---------------------------------------------------------------------------
-spindle.onFrontendMessage(async (payload: any, userId: string, frontendSessionId?: string) => {
+type FrontendRequest =
+  | { type: 'get_latest' | 'clear_history'; chatId: string | null }
+  | { type: 'get_history'; chatId: string | null; requestId: string }
+  | { type: 'get_by_id'; chatId: string | null; id: string }
+  | { type: 'get_settings' }
+  | { type: 'save_settings'; settings: Settings }
+
+spindle.onFrontendMessage(async (value: unknown, userId: string, frontendSessionId?: string) => {
+  const payload = value as FrontendRequest
   const state = stateFor(userId)
-  const chatId = payload.chatId || state.activeChatId
+  const chatId = 'chatId' in payload && typeof payload.chatId === 'string' && payload.chatId ? payload.chatId : null
   switch (payload.type) {
     case 'get_latest':
       sendToUser(userId, {
         type: 'prompt_data',
+        chatId,
         snapshot: state.store.getLatest(chatId),
       }, frontendSessionId)
       break
@@ -887,6 +984,8 @@ spindle.onFrontendMessage(async (payload: any, userId: string, frontendSessionId
     case 'get_history':
       sendToUser(userId, {
         type: 'prompt_history',
+        chatId,
+        requestId: payload.requestId,
         snapshots: state.store.getAll(chatId),
       }, frontendSessionId)
       break
@@ -894,13 +993,14 @@ spindle.onFrontendMessage(async (payload: any, userId: string, frontendSessionId
     case 'get_by_id':
       sendToUser(userId, {
         type: 'prompt_data',
-        snapshot: state.store.getById(payload.id),
+        chatId,
+        snapshot: state.store.getById(payload.id, chatId),
       }, frontendSessionId)
       break
 
     case 'clear_history':
       state.store.clearChat(chatId)
-      sendToUser(userId, { type: 'history_cleared' }, frontendSessionId)
+      sendToUser(userId, { type: 'history_cleared', chatId })
       break
 
     case 'get_settings': {
@@ -912,8 +1012,8 @@ spindle.onFrontendMessage(async (payload: any, userId: string, frontendSessionId
     case 'save_settings':
       try {
         await saveSettings(payload.settings, userId)
-      } catch (err: any) {
-        spindle.toast.error(`Failed to save settings: ${err?.message ?? err}`)
+      } catch (err) {
+        spindle.toast.error(`Failed to save settings: ${err instanceof Error ? err.message : String(err)}`)
       }
       break
   }

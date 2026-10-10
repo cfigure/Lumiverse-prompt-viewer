@@ -1,7 +1,7 @@
 {
   "name": "prompt-viewer",
   "version": "1.0.9",
-  "description": "Post-send prompt viewer for Lumiverse",
+  "description": "Assembled-prompt debugging viewer for Lumiverse 1.2.5",
   "type": "module",
   "scripts": {
     "build": "bun run build:backend && bun run build:frontend",
@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "lumiverse-spindle-types": "^0.6.36",
-    "typescript": "5.4"
+    "lumiverse-spindle-types": "0.6.40",
+    "typescript": "5.4.5"
   }
 }

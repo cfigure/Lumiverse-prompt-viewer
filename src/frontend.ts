@@ -26,6 +26,8 @@ interface PromptSnapshot {
   messages: LlmMessage[]
   context: Record<string, unknown>
   estimatedTokens: number
+  messageTokenCounts?: { tokens: number; approximate: boolean }[]
+  rejectedMessageTokenCount?: { tokens: number; approximate: boolean }
   generationId?: string
   messageId?: string
   messageNumber?: number
@@ -146,6 +148,12 @@ function tokenSourceLabel(snap: PromptSnapshot): string {
     case 'fallback': return 'fallback estimate'
     default: return snap.approximateTokens === false ? 'native' : 'estimate'
   }
+}
+
+function blockTokenLabel(count: { tokens: number; approximate: boolean } | undefined, text: string): string {
+  return count
+    ? `${count.approximate ? '~' : ''}${count.tokens} tok`
+    : `~${Math.ceil(text.length / 4)} tok`
 }
 
 function copyToClipboard(text: string): void {
@@ -349,6 +357,7 @@ function createSettingsUI(
 // ---------------------------------------------------------------------------
 export function setup(ctx: SpindleFrontendContext) {
   const cleanups: (() => void)[] = []
+  let active = true
 
   const removeStyle = ctx.dom.addStyle(PANEL_CSS)
   cleanups.push(removeStyle)
@@ -360,8 +369,15 @@ export function setup(ctx: SpindleFrontendContext) {
   let viewMode: 'formatted' | 'raw' | 'rendered' = settings.defaultViewMode
   let showDryRuns = settings.showDryRunsByDefault
   let initialSettingsApplied = false
+  let latestHistoryRequestId: string | null = null
   function backendPayload(payload: Record<string, unknown>): Record<string, unknown> {
-    return currentChatId ? { ...payload, chatId: currentChatId } : payload
+    return { ...payload, chatId: currentChatId }
+  }
+
+  function requestHistory(): void {
+    if (!active) return
+    latestHistoryRequestId = crypto.randomUUID()
+    ctx.sendToBackend(backendPayload({ type: 'get_history', requestId: latestHistoryRequestId }))
   }
 
   try {
@@ -371,46 +387,21 @@ export function setup(ctx: SpindleFrontendContext) {
     currentChatId = null
   }
 
-  // ---- Permission request on startup ----
-  ctx.permissions.getGranted().then((granted: string[]) => {
-    const missing = GATED_PERMISSIONS.filter((p) => !granted.includes(p))
-    if (missing.length === 0) return
-    ctx.ui.showConfirm({
-      title: 'Permissions Required',
-      message: `Prompt Viewer needs the following permissions to function: ${missing.join(', ')}.`,
-      variant: 'info',
-      confirmLabel: 'Grant Permissions',
-      cancelLabel: 'Not Now',
-    }).then(({ confirmed }) => {
-      if (confirmed) ctx.permissions.request(missing)
-    })
-  })
-
-  // React to permission changes in real-time
-  function handlePermissionChanged(payload: any): void {
-    // API shape: { permission, granted, allGranted }
-    if (payload.granted) {
-      // Permission was just granted — refresh data
-      ctx.sendToBackend(backendPayload({ type: 'get_history' }))
-    }
-  }
-  const unsubPermissionNew = ctx.events.on('PERMISSION_CHANGED', handlePermissionChanged)
-  cleanups.push(unsubPermissionNew)
-
   // ---- Settings mount ----
   const settingsMount = ctx.ui.mount('settings_extensions')
+  // The host stamps the installed row ID here; the manifest identifier is not
+  // the identity used by SPINDLE_PERMISSION_CHANGED.
+  const extensionId = settingsMount.getAttribute('data-spindle-extension-root')
   const settingsUI = createSettingsUI(ctx, settings, (newSettings) => {
     settings = newSettings
     viewMode = settings.defaultViewMode
     updateButtonStates()
     reconcileSelection(currentSnapshot?.id)
-    ctx.sendToBackend({ type: 'save_settings', settings })
-    ctx.sendToBackend(backendPayload({ type: 'get_history' }))
+    ctx.sendToBackend(backendPayload({ type: 'save_settings', settings }))
+    requestHistory()
   })
   settingsMount.appendChild(settingsUI.root)
   cleanups.push(() => { settingsUI.destroy(); settingsUI.root.remove() })
-
-  ctx.sendToBackend({ type: 'get_settings' })
 
   // ---- Drawer tab ----
   const tab = ctx.ui.registerDrawerTab({
@@ -427,7 +418,7 @@ export function setup(ctx: SpindleFrontendContext) {
   cleanups.push(() => tab.destroy())
 
   const unsubActivate = tab.onActivate(() => {
-    ctx.sendToBackend(backendPayload({ type: 'get_history' }))
+    requestHistory()
   })
   cleanups.push(unsubActivate)
 
@@ -697,7 +688,7 @@ export function setup(ctx: SpindleFrontendContext) {
         rejRight.className = 'pv-header-right'
         const rejBadge = document.createElement('span')
         rejBadge.className = 'pv-token-badge'
-        rejBadge.textContent = `~${Math.ceil(snap.rejectedMessage.length / 4)} tok`
+        rejBadge.textContent = blockTokenLabel(snap.rejectedMessageTokenCount, snap.rejectedMessage)
         rejRight.appendChild(rejBadge)
         addHeaderCopy(rejRight, () => snap.rejectedMessage ?? '')
         const rejToggle = document.createElement('span')
@@ -749,7 +740,7 @@ export function setup(ctx: SpindleFrontendContext) {
       right.className = 'pv-header-right'
       const badge = document.createElement('span')
       badge.className = 'pv-token-badge'
-      badge.textContent = `~${Math.ceil(text.length / 4)} tok`
+      badge.textContent = blockTokenLabel(snap.messageTokenCounts?.[i], text)
       right.appendChild(badge)
       addHeaderCopy(right, () => text)
       const toggle = document.createElement('span')
@@ -930,10 +921,9 @@ export function setup(ctx: SpindleFrontendContext) {
     renderSnapshot(snap)
   })
 
-  refreshBtn.addEventListener('click', () => ctx.sendToBackend(backendPayload({ type: 'get_history' })))
+  refreshBtn.addEventListener('click', requestHistory)
 
   settingsBtn.addEventListener('click', () => {
-    const extensionId = settingsMount.getAttribute('data-spindle-extension-root')
     ctx.events.emit('open-settings', {
       view: 'extensions',
       ...(extensionId ? { extensionId } : {}),
@@ -961,13 +951,21 @@ export function setup(ctx: SpindleFrontendContext) {
   })
 
   clearBtn.addEventListener('click', async () => {
-    const { confirmed } = await ctx.ui.showConfirm({
-      title: 'Clear Prompt History',
-      message: 'Clear all captured prompts for this chat? This cannot be undone.',
-      variant: 'danger',
-      confirmLabel: 'Clear',
-    })
-    if (confirmed) ctx.sendToBackend(backendPayload({ type: 'clear_history' }))
+    const chatId = currentChatId
+    if (!active || chatId === null) return
+    try {
+      const { confirmed } = await ctx.ui.showConfirm({
+        title: 'Clear Prompt History',
+        message: 'Clear all captured prompts for this chat? This cannot be undone.',
+        variant: 'danger',
+        confirmLabel: 'Clear',
+      })
+      if (!active || !confirmed) return
+      if (currentChatId === chatId) latestHistoryRequestId = null
+      ctx.sendToBackend({ type: 'clear_history', chatId })
+    } catch (error) {
+      if (active) console.warn('Prompt Viewer could not confirm clearing history:', error)
+    }
   })
 
   rawBtn.addEventListener('click', () => {
@@ -990,12 +988,15 @@ export function setup(ctx: SpindleFrontendContext) {
 
   // ---- Backend messages ----
   const unsubBackend = ctx.onBackendMessage((payload: any) => {
+    if (!active) return
+    if (
+      ['prompt_captured', 'prompt_history', 'prompt_data', 'history_cleared', 'snapshot_updated'].includes(payload.type)
+      && (currentChatId === null || payload.chatId !== currentChatId)
+    ) return
     switch (payload.type) {
       case 'prompt_captured': {
         const snap = payload.snapshot as PromptSnapshot
-        const snapChatId = (snap?.context as any)?.chatId
-        if (snapChatId && currentChatId && snapChatId !== currentChatId) break
-        if (!currentChatId && snapChatId) currentChatId = snapChatId
+        if (!snap) break
         history.unshift(snap)
         if (history.length > settings.maxHistoryPerChat) history.pop()
         const isDry = snap.isDryRun
@@ -1008,6 +1009,7 @@ export function setup(ctx: SpindleFrontendContext) {
       }
 
       case 'prompt_history': {
+        if (payload.requestId !== undefined && payload.requestId !== latestHistoryRequestId) break
         history = payload.snapshots ?? []
         reconcileSelection()
         break
@@ -1019,14 +1021,8 @@ export function setup(ctx: SpindleFrontendContext) {
       }
 
       case 'history_cleared': {
+        latestHistoryRequestId = null
         history = []
-        reconcileSelection()
-        break
-      }
-
-      case 'chat_changed': {
-        currentChatId = payload.chatId
-        history = payload.snapshots ?? []
         reconcileSelection()
         break
       }
@@ -1054,7 +1050,7 @@ export function setup(ctx: SpindleFrontendContext) {
           updateButtonStates()
           settingsUI.update(settings)
           reconcileSelection(currentSnapshot?.id)
-          ctx.sendToBackend(backendPayload({ type: 'get_history' }))
+          requestHistory()
         }
         break
       }
@@ -1062,11 +1058,60 @@ export function setup(ctx: SpindleFrontendContext) {
   })
   cleanups.push(unsubBackend)
 
+  // ---- Local chat navigation ----
+  function handleActiveChat(value: { chatId: string | null }): void {
+    if (!active || value.chatId === currentChatId) return
+    currentChatId = value.chatId
+    latestHistoryRequestId = null
+    history = []
+    reconcileSelection()
+    requestHistory()
+  }
+  if (ctx.state) {
+    cleanups.push(ctx.state.subscribe<{ chatId: string | null }>('chat.active', handleActiveChat))
+    handleActiveChat(ctx.state.get<{ chatId: string | null }>('chat.active'))
+  }
+
+  // React only to grants for this installed extension.
+  const unsubPermission = ctx.events.on('SPINDLE_PERMISSION_CHANGED', (payload: unknown) => {
+    if (
+      !active || !extensionId || !payload || typeof payload !== 'object'
+      || !('extensionId' in payload) || payload.extensionId !== extensionId
+    ) return
+    if ('granted' in payload && payload.granted === true) requestHistory()
+  })
+  cleanups.push(unsubPermission)
+
+  async function requestMissingPermissions(): Promise<void> {
+    try {
+      const granted = await ctx.permissions.getGranted()
+      if (!active) return
+      const missing = GATED_PERMISSIONS.filter((p) => !granted.includes(p))
+      if (missing.length === 0) return
+      const { confirmed } = await ctx.ui.showConfirm({
+        title: 'Permissions Required',
+        message: `Prompt Viewer needs the following permissions to function: ${missing.join(', ')}.`,
+        variant: 'info',
+        confirmLabel: 'Grant Permissions',
+        cancelLabel: 'Not Now',
+      })
+      if (!active || !confirmed) return
+      await ctx.permissions.request(missing)
+      if (active) requestHistory()
+    } catch (error) {
+      if (active) console.warn('Prompt Viewer permission request was not completed:', error)
+    }
+  }
+
   // ---- Initial fetch ----
-  ctx.sendToBackend(backendPayload({ type: 'get_history' }))
+  ctx.sendToBackend(backendPayload({ type: 'get_settings' }))
+  requestHistory()
+  void requestMissingPermissions()
 
   // ---- Cleanup ----
   return () => {
+    active = false
+    latestHistoryRequestId = null
     for (const fn of cleanups) {
       try { fn() } catch {}
     }
