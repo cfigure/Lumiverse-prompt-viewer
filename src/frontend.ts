@@ -369,6 +369,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let viewMode: 'formatted' | 'raw' | 'rendered' = settings.defaultViewMode
   let showDryRuns = settings.showDryRunsByDefault
   let initialSettingsApplied = false
+  let historyRequestSequence = 0
   let latestHistoryRequestId: string | null = null
   function backendPayload(payload: Record<string, unknown>): Record<string, unknown> {
     return { ...payload, chatId: currentChatId }
@@ -376,7 +377,8 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function requestHistory(): void {
     if (!active) return
-    latestHistoryRequestId = crypto.randomUUID()
+    // Replies are session-scoped; correlation needs no secure-context crypto API.
+    latestHistoryRequestId = String(++historyRequestSequence)
     ctx.sendToBackend(backendPayload({ type: 'get_history', requestId: latestHistoryRequestId }))
   }
 
