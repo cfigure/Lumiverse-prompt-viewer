@@ -1,6 +1,6 @@
 {
   "name": "prompt-viewer",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Assembled-prompt debugging viewer for Lumiverse 1.2.5",
   "type": "module",
   "scripts": {

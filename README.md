@@ -141,11 +141,16 @@ Each window follows its locally displayed chat. Windows viewing the same chat sh
 
 ## Compatibility
 
-Prompt Viewer **1.0.9** requires Lumiverse **1.2.5 or newer**. The interceptor must supply a user ID so captures can be kept separate on operator-scoped installations. The development type dependency is pinned to `lumiverse-spindle-types` **0.6.40**, matching Lumiverse 1.2.5.
+Prompt Viewer **1.0.10** requires Lumiverse **1.2.5 or newer**. The interceptor must supply a user ID so captures can be kept separate on operator-scoped installations. The development type dependency is pinned to `lumiverse-spindle-types` **0.6.40**, matching Lumiverse 1.2.5.
 
-Version 1.0.9 targets Lumiverse 1.2.5 main, including the runtime cancellation signal, authoritative dry-run classification, multipart message content, native token counting, final generation breakdown metadata, and local frontend chat-state subscriptions.
+Version 1.0.10 targets Lumiverse 1.2.5 main, including the runtime cancellation signal, authoritative dry-run classification, multipart message content, native token counting, final generation breakdown metadata, and local frontend chat-state subscriptions.
 
 ## Changelog
+
+### 1.0.10
+
+- Fix the 1.0.9 frontend startup regression when accessing Lumiverse over plain network HTTP, including affected mobile/PWA access. History requests no longer depend on the secure-context-only `crypto.randomUUID()` browser API.
+- Preserve chat/request correlation and stale-history reply protection using a per-panel request counter.
 
 ### 1.0.9
 
