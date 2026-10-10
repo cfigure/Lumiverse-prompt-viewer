@@ -119,31 +119,45 @@ Prompt Viewer requests:
 | `chat_mutation` | Reconcile captured prompts with created and deleted chat messages |
 | `chats` | Support current-chat and chat-switch behaviour across Lumiverse builds |
 
+Revoking `interceptor` stops new captures; revoking `generation` stops generation tracking. Regranting restores the affected feature without retoggling the extension. Existing in-memory captures remain available until cleared or restarted.
+
 ## Data and privacy
 
 Prompt captures are held **in memory only**. They are not written to disk and are cleared when the extension or Lumiverse restarts. Extension settings are persisted by Lumiverse.
 
 Prompt Viewer does not modify the prompt returned to Lumiverse. It clones the serializable prompt data for display and omits runtime-only values such as the interceptor cancellation signal from its snapshot.
 
+Each window follows its locally displayed chat. Windows viewing the same chat share its captured history; clearing that history updates all of them. Windows viewing different chats remain independent, and stale history replies cannot redirect the viewer.
+
 ## Known limitations
 
 - **Capture point:** Prompt Viewer records messages at its late interceptor position. The extension API does not provide a separate hook containing the exact final provider request body.
 - **Provider normalization:** The resolved parameters shown by Prompt Breakdown may still differ from an exact provider HTTP payload if a provider adapter renames, omits, or normalizes fields.
 - **Internal JSON markers:** Lumiverse may attach bookkeeping keys such as `_fromSystem`, `__isChatHistory`, `sourceMessageId`, and `sourceIndexInChat` to in-memory message objects. Providers rebuild their request from supported message fields; these markers are not prompt text. They can be hidden with the JSON marker setting.
-- **Token counts:** Counts are exact only when Lumiverse has an appropriate tokenizer for the active model. Otherwise Lumiverse or Prompt Viewer may provide an estimate.
+- **Token counts:** Overall and individual message/rejected-message counts use Lumiverse's native counters for the selected model when available. Counts start as labelled estimates and update asynchronously; a native failure retains a labelled characters/4 fallback. Individual text counts exclude the overall counter's role/newline overhead and need not sum to the total. Multipart content is counted through a readable text projection and remains approximate, not a provider billable-token count.
 - **OOC detection:** Regeneration feedback is identified by matching Lumiverse's injected `[OOC: ...]` shape because the interceptor context does not expose the feedback separately. User-authored content with the same shape may be classified as regeneration feedback.
 - **Likely automatic Dry Run detection:** Lumiverse does not identify which extension requested a Dry Run. Prompt Viewer therefore uses timing around chat entry and regeneration staging, which can produce unusual false positives or false negatives.
 - **Swipe and deletion reconciliation:** Very unusual event ordering, rapid regenerations, or deletion before a snapshot is linked to a message can leave a capture labelled imperfectly or retained until history is cleared.
 
 ## Compatibility
 
-Prompt Viewer **1.0.8** requires Lumiverse **1.1.0 or newer**.
+Prompt Viewer **1.0.9** requires Lumiverse **1.2.5 or newer**. The interceptor must supply a user ID so captures can be kept separate on operator-scoped installations. The development type dependency is pinned to `lumiverse-spindle-types` **0.6.40**, matching Lumiverse 1.2.5.
 
-Version 1.0.8 supports the current Lumiverse staging interceptor context, including the runtime cancellation signal, authoritative dry-run classification, multipart message content, native token counting, final generation breakdown metadata, and updated chat lifecycle events.
+Version 1.0.9 targets Lumiverse 1.2.5 main, including the runtime cancellation signal, authoritative dry-run classification, multipart message content, native token counting, final generation breakdown metadata, and local frontend chat-state subscriptions.
 
 ## Changelog
 
-See [Releases](https://github.com/cfigure/Lumiverse-prompt-viewer/releases) for version history.
+### 1.0.9
+
+- Keep prompt history, settings, lifecycle state, and frontend updates separate for each user in operator-scoped installations.
+- Link completed messages only to their matching live capture; a missing capture can no longer claim a nearby Dry Run.
+- Associate added swipes with the upcoming generation without relabelling an older prompt capture.
+- Honor live permission revocation/regrant and use the correctly scoped frontend permission-change event.
+- Follow each window's local chat, correlate history replies to their chat/request, and synchronize same-chat clears without changing other windows.
+- Resolve Dry Run token counts against the selected connection's model and use native batch counting for message and rejected-message badges.
+- Prevent deferred token/profile updates from publishing captures that were cleared or whose capture permission was revoked.
+
+See [Releases](https://github.com/cfigure/Lumiverse-prompt-viewer/releases) for earlier versions.
 
 ## License
 
