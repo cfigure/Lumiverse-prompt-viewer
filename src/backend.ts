@@ -7,11 +7,18 @@ import type { PromptSnapshot, LlmMessage, InterceptorMeta, AutoDryRunEvidence, L
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
+if ((spindle.host?.capabilities?.['uuid-v1'] ?? 0) < 1 || typeof spindle.uuid?.v4 !== 'function') {
+  throw new Error('Prompt Viewer 1.0.11 requires the Spindle uuid-v1 backend API. Update Lumiverse.')
+}
+
+type PendingSnapshot = Omit<PromptSnapshot, 'id'>
+
 interface UserState {
   store: PromptStore
   activeGenerations: Map<string, ActiveGenerationMeta>
   pendingSwipeAdds: Map<string, { swipeIndex?: number; timestamp: number }>
   pendingAutoDryRunEvidence: Map<string, PendingAutoDryRunEvidence>
+  pendingCaptures: Set<PendingSnapshot>
 }
 
 const userStates = new Map<string, UserState>()
@@ -24,6 +31,7 @@ function stateFor(userId: string): UserState {
       activeGenerations: new Map(),
       pendingSwipeAdds: new Map(),
       pendingAutoDryRunEvidence: new Map(),
+      pendingCaptures: new Set(),
     }
     userStates.set(userId, state)
   }
@@ -535,13 +543,11 @@ function tryRegisterInterceptor(): void {
       // context (for intercept_abort support). AbortSignal is not
       // structured-cloneable, so strip it — and defensively drop any other
       // non-cloneable values the host may add later — before snapshotting.
-      const { signal: _signal, ...cloneableCtx } =
+      const { signal, ...cloneableCtx } =
         ctx as InterceptorMeta & { signal?: AbortSignal }
+      if (signal?.aborted) return messages
 
-      // ONLY the clones must happen synchronously: later pipeline stages
-      // (applyPostProcessing, other interceptors) mutate the message array in
-      // place, so we must copy before returning. Everything below operates on
-      // our private copies and is deferred off the generation's critical path.
+      // Copy before yielding: later pipeline stages must never mutate a capture.
       const capturedMessages = structuredClone(messages) as LlmMessage[]
       const ctxSnapshot = cloneSafe(cloneableCtx) as InterceptorMeta
 
@@ -556,91 +562,87 @@ function tryRegisterInterceptor(): void {
       const state = stateFor(ctxUserId)
       const captureEnrichmentEpoch = enrichmentEpoch
 
-      // queueMicrotask (NOT setTimeout): microtasks drain before the worker
-      // can process any subsequent host postMessage, so activeGenerations and
-      // pendingSwipeAdds are read in exactly the state a synchronous read
-      // would have seen — a later GENERATION_ENDED cannot sneak in between.
-      queueMicrotask(() => {
-        if (registrationEpoch !== interceptorEpoch || !spindle.permissions.has('interceptor')) return
-        try {
-          const snapshot: PromptSnapshot = {
-            id: crypto.randomUUID(),
-            timestamp: Date.now(),
-            messages: capturedMessages,
-            context: ctxSnapshot,
-            estimatedTokens: estimateTokensFallback(capturedMessages),
-            tokenCountSource: 'fallback',
-            approximateTokens: true,
-            messageTokenCounts: capturedMessages.map((m) => ({
-              tokens: Math.ceil(messageText(m.content).length / 4),
-              approximate: true,
-            })),
-          }
+      // Freeze lifecycle metadata before requesting the asynchronous host UUID.
+      // The interceptor stays pending until the snapshot is stored, so normal
+      // generation completion cannot overtake capture registration.
+      const capture: PendingSnapshot = {
+        timestamp: Date.now(),
+        messages: capturedMessages,
+        context: ctxSnapshot,
+        estimatedTokens: estimateTokensFallback(capturedMessages),
+        tokenCountSource: 'fallback',
+        approximateTokens: true,
+        messageTokenCounts: capturedMessages.map((m) => ({
+          tokens: Math.ceil(messageText(m.content).length / 4),
+          approximate: true,
+        })),
+      }
 
-          // Staging provides an authoritative dryRun boolean in interceptor
-          // context. Trust it when present; only infer from generation events
-          // for compatibility with older hosts that do not provide the flag.
-          // A confirmed dry run must never inherit metadata from a coincident
-          // live generation, even if one exists for the same chat.
-          const contextDryRun = typeof ctxSnapshot.dryRun === 'boolean'
-            ? ctxSnapshot.dryRun
-            : undefined
-          const active = contextDryRun === true || !spindle.permissions.has('generation')
-            ? null
-            : getActiveGenerationForChat(state, ctxSnapshot.chatId)
-          snapshot.isDryRun = contextDryRun ?? !active
-          if (snapshot.isDryRun && typeof ctxSnapshot.chatId === 'string') {
-            const evidence = consumeAutoDryRunEvidence(state, ctxSnapshot.chatId, Date.now())
-            if (evidence) {
-              snapshot.isLikelyAutoDryRun = true
-              snapshot.autoDryRunEvidence = evidence
-            }
-          }
-          if (active) {
-            snapshot.generationId = active.generationId
-            if (active.meta.model) snapshot.model = active.meta.model
-
-            const key = swipeKey(ctxSnapshot.chatId, active.meta.targetMessageId)
-            const pendingSwipe = key ? state.pendingSwipeAdds.get(key) : null
-            if ((pendingSwipe && (active.meta.targetSwipeId === undefined || pendingSwipe.swipeIndex === active.meta.targetSwipeId))
-              || active.meta.generationType === 'swipe') {
-              snapshot.isSwipe = true
-              snapshot.swipeIndex = active.meta.targetSwipeId ?? pendingSwipe?.swipeIndex
-            }
-          }
-
-
-          // OOC marker detection. Runs unconditionally (no generationType gate)
-          // so composer-regen, swipe, and the explicit regenerate path all
-          // surface the banner. See detectRegenFeedback() for caveats.
-          const detected = detectRegenFeedback(capturedMessages)
-          if (detected) {
-            snapshot.regenFeedback = detected.text
-            snapshot.regenFeedbackRaw = detected.raw
-            snapshot.regenFeedbackPosition = detected.position
-            if (detected.rejectedMessage !== undefined) {
-              snapshot.rejectedMessage = detected.rejectedMessage
-              snapshot.rejectedMessageTokenCount = {
-                tokens: Math.ceil(detected.rejectedMessage.length / 4),
-                approximate: true,
-              }
-            }
-          }
-
-          state.store.push(snapshot)
-
-          sendToUser(ctxUserId, {
-            type: 'prompt_captured',
-            chatId: ctxSnapshot.chatId ?? null,
-            snapshot,
-          })
-          void enrichSnapshot(snapshot, state, ctxUserId, captureEnrichmentEpoch).catch((err: unknown) => {
-            spindle.log.error(`Failed to enrich prompt: ${err instanceof Error ? err.message : String(err)}`)
-          })
-        } catch (err) {
-          spindle.log.error(`Failed to capture prompt: ${err instanceof Error ? err.message : String(err)}`)
+      // A confirmed Dry Run must never inherit a coincident live generation.
+      const contextDryRun = typeof ctxSnapshot.dryRun === 'boolean'
+        ? ctxSnapshot.dryRun
+        : undefined
+      const active = contextDryRun === true || !spindle.permissions.has('generation')
+        ? null
+        : getActiveGenerationForChat(state, ctxSnapshot.chatId)
+      capture.isDryRun = contextDryRun ?? !active
+      if (capture.isDryRun && typeof ctxSnapshot.chatId === 'string') {
+        const evidence = consumeAutoDryRunEvidence(state, ctxSnapshot.chatId, capture.timestamp)
+        if (evidence) {
+          capture.isLikelyAutoDryRun = true
+          capture.autoDryRunEvidence = evidence
         }
-      })
+      }
+      if (active) {
+        capture.generationId = active.generationId
+        if (active.meta.model) capture.model = active.meta.model
+
+        const key = swipeKey(ctxSnapshot.chatId, active.meta.targetMessageId)
+        const pendingSwipe = key ? state.pendingSwipeAdds.get(key) : null
+        if ((pendingSwipe && (active.meta.targetSwipeId === undefined || pendingSwipe.swipeIndex === active.meta.targetSwipeId))
+          || active.meta.generationType === 'swipe') {
+          capture.isSwipe = true
+          capture.swipeIndex = active.meta.targetSwipeId ?? pendingSwipe?.swipeIndex
+        }
+      }
+
+      // OOC detection is independent of generationType; composer regens can be normal.
+      const detected = detectRegenFeedback(capturedMessages)
+      if (detected) {
+        capture.regenFeedback = detected.text
+        capture.regenFeedbackRaw = detected.raw
+        capture.regenFeedbackPosition = detected.position
+        if (detected.rejectedMessage !== undefined) {
+          capture.rejectedMessage = detected.rejectedMessage
+          capture.rejectedMessageTokenCount = {
+            tokens: Math.ceil(detected.rejectedMessage.length / 4),
+            approximate: true,
+          }
+        }
+      }
+
+      state.pendingCaptures.add(capture)
+      try {
+        const id = await spindle.uuid.v4()
+        // Clear, cancellation, and permission changes can arrive during the RPC.
+        if (!state.pendingCaptures.has(capture) || signal?.aborted
+          || registrationEpoch !== interceptorEpoch
+          || captureEnrichmentEpoch !== enrichmentEpoch
+          || !spindle.permissions.has('interceptor')) return messages
+
+        const snapshot: PromptSnapshot = Object.assign(capture, { id })
+        state.store.push(snapshot)
+        sendToUser(ctxUserId, {
+          type: 'prompt_captured',
+          chatId: ctxSnapshot.chatId ?? null,
+          snapshot,
+        })
+        void enrichSnapshot(snapshot, state, ctxUserId, captureEnrichmentEpoch).catch((err: unknown) => {
+          spindle.log.error(`Failed to enrich prompt: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      } finally {
+        state.pendingCaptures.delete(capture)
+      }
     } catch (err) {
       spindle.log.error(`Failed to capture prompt: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -1000,6 +1002,9 @@ spindle.onFrontendMessage(async (value: unknown, userId: string, frontendSession
 
     case 'clear_history':
       state.store.clearChat(chatId)
+      for (const capture of state.pendingCaptures) {
+        if (capture.context.chatId === chatId) state.pendingCaptures.delete(capture)
+      }
       sendToUser(userId, { type: 'history_cleared', chatId })
       break
 

@@ -141,11 +141,31 @@ Each window follows its locally displayed chat. Windows viewing the same chat sh
 
 ## Compatibility
 
-Prompt Viewer **1.0.10** requires Lumiverse **1.2.5 or newer**. The interceptor must supply a user ID so captures can be kept separate on operator-scoped installations. The development type dependency is pinned to `lumiverse-spindle-types` **0.6.40**, matching Lumiverse 1.2.5.
+Prompt Viewer **1.0.11** requires Lumiverse **1.3.0 or newer** with the Spindle backend **`uuid-v1`** capability. Startup reports a compatibility error if that API is unavailable. The interceptor must supply a user ID so captures can be kept separate on operator-scoped installations. The development type dependency is pinned to `lumiverse-spindle-types` **0.6.80**.
 
-Version 1.0.10 targets Lumiverse 1.2.5 main, including the runtime cancellation signal, authoritative dry-run classification, multipart message content, native token counting, final generation breakdown metadata, and local frontend chat-state subscriptions.
+Snapshot IDs are generated with `await spindle.uuid.v4()`. Each capture makes one local request to the Spindle host and is stored before the interceptor returns; token counting remains asynchronous. Capture-time prompt data and generation metadata are copied before waiting. Captures cleared, cancelled, or invalidated by a permission change while UUID generation is pending are not published later.
+
+The frontend history-request counter remains session-scoped and does not require UUID generation, preserving plain-HTTP browser support.
+
+## Development
+
+```sh
+bun install
+bun run typecheck
+bun run test
+```
+
+The test command builds both bundles and exercises the backend against an isolated mock Spindle host, including delayed and failed UUID responses. It does not launch Lumiverse.
 
 ## Changelog
+
+### 1.0.11
+
+- Generate snapshot UUIDs through the Spindle backend `uuid.v4()` API instead of calling `crypto.randomUUID()` directly. Preserve UUID snapshot identity and the existing frontend request counter.
+- Await UUID generation before returning from the interceptor so normal generation completion and final breakdown metadata cannot overtake snapshot registration.
+- Preserve capture-time prompt data, Dry Run classification, and swipe metadata across the asynchronous UUID request.
+- Prevent cleared, cancelled, or permission-invalidated pending captures from appearing after the UUID response.
+- Require Lumiverse 1.3.0 with `uuid-v1`, update Spindle types to 0.6.80, and add asynchronous capture regression coverage.
 
 ### 1.0.10
 
