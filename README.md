@@ -145,43 +145,6 @@ Prompt Viewer **1.0.11** requires Lumiverse **1.3.0 or newer** with the Spindle 
 
 Snapshot IDs are generated with `await spindle.uuid.v4()`. Each capture makes one local request to the Spindle host and is stored before the interceptor returns; token counting remains asynchronous. Capture-time prompt data and generation metadata are copied before waiting. Captures cleared, cancelled, or invalidated by a permission change while UUID generation is pending are not published later.
 
-The frontend history-request counter remains session-scoped and does not require UUID generation, preserving plain-HTTP browser support.
-
-## Development
-
-```sh
-bun install
-bun run typecheck
-bun run test
-```
-
-The test command builds both bundles and exercises the backend against an isolated mock Spindle host, including delayed and failed UUID responses. It does not launch Lumiverse.
-
-## Changelog
-
-### 1.0.11
-
-- Generate snapshot UUIDs through the Spindle backend `uuid.v4()` API instead of calling `crypto.randomUUID()` directly. Preserve UUID snapshot identity and the existing frontend request counter.
-- Await UUID generation before returning from the interceptor so normal generation completion and final breakdown metadata cannot overtake snapshot registration.
-- Preserve capture-time prompt data, Dry Run classification, and swipe metadata across the asynchronous UUID request.
-- Prevent cleared, cancelled, or permission-invalidated pending captures from appearing after the UUID response.
-- Require Lumiverse 1.3.0 with `uuid-v1`, update Spindle types to 0.6.80, and add asynchronous capture regression coverage.
-
-### 1.0.10
-
-- Fix the 1.0.9 frontend startup regression when accessing Lumiverse over plain network HTTP, including affected mobile/PWA access. History requests no longer depend on the secure-context-only `crypto.randomUUID()` browser API.
-- Preserve chat/request correlation and stale-history reply protection using a per-panel request counter.
-
-### 1.0.9
-
-- Keep prompt history, settings, lifecycle state, and frontend updates separate for each user in operator-scoped installations.
-- Link completed messages only to their matching live capture; a missing capture can no longer claim a nearby Dry Run.
-- Associate added swipes with the upcoming generation without relabelling an older prompt capture.
-- Honor live permission revocation/regrant and use the correctly scoped frontend permission-change event.
-- Follow each window's local chat, correlate history replies to their chat/request, and synchronize same-chat clears without changing other windows.
-- Resolve Dry Run token counts against the selected connection's model and use native batch counting for message and rejected-message badges.
-- Prevent deferred token/profile updates from publishing captures that were cleared or whose capture permission was revoked.
-
 See [Releases](https://github.com/cfigure/Lumiverse-prompt-viewer/releases) for earlier versions.
 
 ## License
